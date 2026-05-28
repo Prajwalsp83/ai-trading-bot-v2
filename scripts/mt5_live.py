@@ -731,7 +731,19 @@ def run_test_trade(side: str) -> int:
     if df15.empty or len(df15) < 30:
         log("not enough bars to compute ATR"); mt5.shutdown(); return 1
     atr_val = float(atr(df15["High"], df15["Low"], df15["Close"], ATR_PERIOD).iloc[-1])
-    log(f"TEST MODE: forcing {side} entry through bot pipeline. ATR={atr_val:.2f}")
+    # Sanity check: latest bar close vs live tick. If they diverge by more than
+    # 2*ATR, the bars are likely stale — abort rather than place a bad trade.
+    tick = mt5.symbol_info_tick(SYMBOL)
+    if tick is None or tick.ask == 0:
+        log("no live tick available"); mt5.shutdown(); return 1
+    last_close = float(df15["Close"].iloc[-1])
+    live_price = tick.ask if side == "BUY" else tick.bid
+    if abs(last_close - live_price) > 2 * atr_val:
+        log(f"STALE BARS: bar_close={last_close:.2f} live={live_price:.2f} "
+            f"diff={abs(last_close-live_price):.2f} > 2*ATR ({2*atr_val:.2f}). Aborting test.")
+        mt5.shutdown(); return 1
+    log(f"TEST MODE: forcing {side} entry through bot pipeline. "
+        f"live={live_price:.2f}  ATR={atr_val:.2f}")
     tg_send(f"<b>[TEST MODE]</b> Forcing {side} GOLD via bot (magic {MAGIC})")
 
     regime_snap = classify_regime(df1h) if not df1h.empty else None

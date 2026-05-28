@@ -887,12 +887,17 @@ def run_test_trade(side: str) -> int:
     if df15.empty or len(df15) < 30:
         log("not enough bars"); mt5.shutdown(); return 1
     atr_val = float(atr(df15["High"], df15["Low"], df15["Close"], ATR_PERIOD).iloc[-1])
-    price = float(df15["Close"].iloc[-1])
+    # Use LIVE tick price for SL/TP, not stale bar close — historical bar data
+    # can be 1-2 bars behind tick especially right after MT5 init.
+    tick = mt5.symbol_info_tick(SYMBOL)
+    if tick is None or tick.ask == 0:
+        log("no tick available"); mt5.shutdown(); return 1
+    price = tick.ask if side == "BUY" else tick.bid
     sig = {"severity": f"{side}_READY", "side": side, "price": price, "atr": atr_val,
            "sl_suggested": price - 1.5 * atr_val if side == "BUY" else price + 1.5 * atr_val,
            "tp_suggested": price + 2.5 * atr_val if side == "BUY" else price - 2.5 * atr_val,
            "rr": 1.67, "poi_score": 0, "reason": "TEST MODE — forced", "htf_bias": "test"}
-    log(f"TEST MODE: forcing {side} through SMC pipeline. price={price:.2f} atr={atr_val:.2f}")
+    log(f"TEST MODE: forcing {side} through SMC pipeline. live_price={price:.2f} atr={atr_val:.2f}")
     tg_send(f"<b>[SMC TEST MODE]</b> Forcing {side} GOLD (magic {MAGIC})")
     regime_snap = classify_regime(df1h) if not df1h.empty else None
     ok = open_market(state, side, sig, regime_snap, None)
