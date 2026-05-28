@@ -77,6 +77,74 @@ if not _check_password():
     st.stop()
 
 
+# ============================== NAV =================================
+# Sidebar view selector. Default: live dashboard. Switch to reports without
+# re-indenting the existing dashboard code (uses st.stop() to short-circuit).
+_view = st.sidebar.radio(
+    "View",
+    ["📊 Live Bot", "📑 Backtest Reports"],
+    label_visibility="collapsed",
+    key="view_mode",
+)
+
+if _view == "📑 Backtest Reports":
+    st.title("📑 Backtest Reports")
+    reports_dir = HERE / "reports"
+    if not reports_dir.exists():
+        st.warning(
+            "No reports directory yet. On the VPS, run:\n\n"
+            "```\npython scripts/generate_tearsheet.py --all\n```"
+        )
+        st.stop()
+
+    html_files = sorted(
+        reports_dir.glob("tearsheet_*.html"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not html_files:
+        st.info("No tearsheet HTML files found in `reports/`. Run the generator first.")
+        st.stop()
+
+    # Selector + metadata
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        choice = st.selectbox(
+            "Choose a backtest report",
+            html_files,
+            format_func=lambda p: p.stem.replace("tearsheet_", ""),
+            key="report_choice",
+        )
+    with col2:
+        st.metric("Report age",
+                   f"{int((datetime.now().timestamp() - choice.stat().st_mtime)/3600)}h")
+        st.metric("Size", f"{choice.stat().st_size / 1024:.0f} KB")
+
+    # Download button
+    with open(choice, "rb") as f:
+        st.download_button(
+            "⬇️ Download this HTML report",
+            f.read(),
+            file_name=choice.name,
+            mime="text/html",
+            use_container_width=True,
+        )
+
+    st.markdown("---")
+
+    # Render inline. QuantStats reports are ~2000-3000px tall.
+    with open(choice, "r", encoding="utf-8", errors="replace") as f:
+        html_content = f.read()
+    st.components.v1.html(html_content, height=2400, scrolling=True)
+
+    # Footer with regen reminder
+    st.caption(
+        f"Reports source: `{reports_dir}` — regenerate with "
+        f"`python scripts/generate_tearsheet.py --all` on the VPS."
+    )
+    st.stop()    # don't render the live dashboard below
+
+
 # ============================== DB ==================================
 @st.cache_resource
 def get_conn():

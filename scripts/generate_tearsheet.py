@@ -149,21 +149,33 @@ def _generate_one(equity_path: Path, history_path: Path | None,
         print(f"  metrics CSV failed (non-fatal): {e}")
 
     # ===== Compact summary to stdout =====
+    # Newer QuantStats sometimes returns Series instead of scalar (when given a
+    # date range). Wrap each stat in _scalar() to coerce safely.
+    def _scalar(v) -> float:
+        try:
+            if hasattr(v, "item"):
+                return float(v.item() if v.size == 1 else v.iloc[-1])
+            if hasattr(v, "iloc"):
+                return float(v.iloc[-1])
+            return float(v)
+        except Exception:
+            return 0.0
+
     print(f"  -> {out_html}")
     try:
         print(f"     period:        {equity.index[0].date()} -> {equity.index[-1].date()} "
               f"({len(returns)} days)")
         print(f"     final equity:  ${equity.iloc[-1]:,.2f} (start ${equity.iloc[0]:,.2f})")
         print(f"     total return:  {(equity.iloc[-1]/equity.iloc[0] - 1)*100:+.2f}%")
-        print(f"     CAGR:          {qs.stats.cagr(returns)*100:+.2f}%")
-        print(f"     Sharpe:        {qs.stats.sharpe(returns):+.2f}")
-        print(f"     Sortino:       {qs.stats.sortino(returns):+.2f}")
-        print(f"     max DD:        {qs.stats.max_drawdown(returns)*100:+.2f}%")
-        print(f"     calmar:        {qs.stats.calmar(returns):+.2f}")
+        print(f"     CAGR:          {_scalar(qs.stats.cagr(returns))*100:+.2f}%")
+        print(f"     Sharpe:        {_scalar(qs.stats.sharpe(returns)):+.2f}")
+        print(f"     Sortino:       {_scalar(qs.stats.sortino(returns)):+.2f}")
+        print(f"     max DD:        {_scalar(qs.stats.max_drawdown(returns))*100:+.2f}%")
+        print(f"     calmar:        {_scalar(qs.stats.calmar(returns)):+.2f}")
         print(f"     win days:      {(returns > 0).sum()}/{len(returns)} "
               f"({(returns > 0).mean()*100:.1f}%)")
     except Exception as e:
-        print(f"     (metric extract failed: {e})")
+        print(f"     (metric extract failed: {type(e).__name__}: {e})")
     return out_html
 
 
