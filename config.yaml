@@ -1,55 +1,73 @@
-# All user-tunable settings. No magic numbers in code.
+# =============================================================================
+# AI Trading Bot — canonical config
+# =============================================================================
+# Single source of truth for both bots. Bots read this at startup via
+# scripts/_config_loader.py. All knobs live here — NO magic numbers in code.
+#
+# Sensitive values (passwords, tokens) live in .env (gitignored).
+# This file IS committed — never put secrets here.
+# =============================================================================
 
-symbols:
-  - GOLDM         # MCX gold mini (100g lot) via Upstox
+# ----- MT5 connection (shared) -----
+# Credentials read from env: MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
+mt5:
+  symbol: "GOLD.i#"           # XM Ultra Low gold ticker
+  poll_seconds: 60            # how often each bot polls MT5
 
-poll_seconds: 60
-
+# ----- Telegram alerts -----
 telegram:
-  bot_token: ${TELEGRAM_BOT_TOKEN}     # set in env, never committed
-  chat_id: "764593674"
+  bot_token_env: TELEGRAM_BOT_TOKEN      # read from .env
+  chat_id_env: TELEGRAM_CHAT_ID
 
+# ----- Postgres journal (Supabase) -----
+# Credentials read from env: DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
+postgres:
+  enabled: true               # set false to disable Postgres writes (CSV-only)
+
+# =============================================================================
+# RISK & CAPITAL MANAGEMENT — non-negotiable safety layer
+# =============================================================================
+# Applies equally to both bots. Phase A change: risk_per_trade_pct 0.02 → 0.01.
 risk:
-  risk_per_trade_pct: 0.02             # 2% of equity per trade
-  daily_loss_cap_pct: 0.03             # halt new trades at -3% on the day
-  max_drawdown_pct: 0.15               # halt all at -15% from peak
-  max_concurrent_positions: 1
+  # === Per-trade sizing ===
+  risk_per_trade_pct: 0.01            # 1% of equity max per trade
+  max_concurrent_positions: 1         # per bot — total 2 across breakout+smc
 
-  # P1: Consecutive-loss cooldown. After N SL hits in a row, block new entries
-  #     for cooldown_minutes_after_losses. Reset on any win.
-  cooldown_after_consecutive_losses: 2
-  cooldown_minutes_after_losses: 240   # 4 hours
+  # === Daily + total kill-switches ===
+  daily_loss_cap_pct: 0.03            # halt new trades at -3% on the day
+  max_drawdown_pct: 0.15              # HARD halt all trading at -15% from peak
+                                       # — requires manual reset of peak_equity
 
-  # P2: Drawdown-scaled risk. When equity is below peak by dd_scale_threshold_pct,
-  #     multiply risk_per_trade_pct by dd_scale_factor until a new equity high.
-  dd_scale_threshold_pct: 0.03         # halve risk when DD >= 3% from peak
-  dd_scale_factor: 0.5
+  # === Cooldown after losing streaks ===
+  cooldown_after_consecutive_losses: 2  # after 2 SL hits in a row
+  cooldown_minutes_after_losses: 240    # pause new entries for 4 hours
+                                         # reset on any win
 
-  # P6 bonus: Block new trade for N minutes after any exit (win OR loss).
-  #     Prevents mechanical re-entry on the same setup.
-  reentry_block_minutes: 120
+  # === Reentry block after any exit (win OR loss) ===
+  reentry_block_minutes: 120          # prevents mechanical re-entry
 
-  # Pro upgrade — 3-tier drawdown scaling (replaces P2 single-tier).
-  # Each tier: at >= threshold_pct DD from peak, apply multiplier to base risk.
-  # 0.0 multiplier HALTS new trades entirely until equity recovers.
+  # === 3-tier drawdown scaling ===
+  # Each tier: at >= threshold_pct DD from peak, multiply base risk by multiplier.
+  # 0.0 = halt new trades entirely until equity recovers above that level.
   dd_tiers:
     - { threshold_pct: 0.12, multiplier: 0.0  }   # 12%+ DD: stop trading
     - { threshold_pct: 0.07, multiplier: 0.25 }   # 7-12%: quarter size
     - { threshold_pct: 0.03, multiplier: 0.50 }   # 3-7%: half size
     - { threshold_pct: 0.0,  multiplier: 1.0  }   # 0-3%: full size
 
-  # Pro upgrade — fractional-Kelly sizing from rolling trade history.
-  # Multiplies into base risk after dd_tier multiplier.
+  # === Fractional Kelly sizing (multiplies on top of DD tier) ===
   kelly:
     enabled: true
-    lookback_trades: 30           # rolling window for win-rate + avg R
-    fraction: 0.25                # quarter-Kelly (industry safety standard)
-    min_trades_required: 10       # use default until we have a sample
-    max_multiplier: 2.0           # cap on hot streak
-    min_multiplier: 0.25          # floor on cold streak
-    default_multiplier: 1.0       # when sample is too small
+    lookback_trades: 30                # rolling window
+    fraction: 0.25                     # quarter-Kelly (industry safety standard)
+    min_trades_required: 10            # use default until we have a sample
+    max_multiplier: 2.0                # cap on hot streak
+    min_multiplier: 0.25               # floor on cold streak
+    default_multiplier: 1.0            # when sample too small
 
-# Pro upgrade — trading session filter (IST, gold-focused)
+# =============================================================================
+# TRADING SESSION FILTER — IST, gold-focused
+# =============================================================================
 sessions:
   enabled: true
   block_weekend: true
@@ -58,7 +76,9 @@ sessions:
     - { name: "NY_overlap",   start_ist: "18:00", end_ist: "21:00" }
     - { name: "NY_afternoon", start_ist: "21:00", end_ist: "23:30" }
 
-# Pro upgrade — economic calendar block (high-impact USD events)
+# =============================================================================
+# ECONOMIC CALENDAR BLOCK — high-impact USD events
+# =============================================================================
 calendar:
   enabled: true
   path: ./data/economic_calendar.json
@@ -67,18 +87,20 @@ calendar:
   impact_threshold: high
   currencies: ["USD"]
 
-# Pro upgrade — Alpha Vantage news sentiment.
-# Free key: https://www.alphavantage.co/support/#api-key
-# Set ALPHA_VANTAGE_KEY env var (in .env file).
+# =============================================================================
+# NEWS SENTIMENT — Alpha Vantage (free 25/day)
+# Key from env: ALPHA_VANTAGE_KEY
+# =============================================================================
 news:
   enabled: true
   cache_path: ./data/.av_news_cache.json
   cache_ttl_minutes: 25
   max_age_hours: 6
-  block_threshold: 0.35           # block BUY if sentiment < -0.35, SELL if > +0.35
+  block_threshold: 0.35              # block BUY if score < -0.35, SELL if > +0.35
 
-# Pro upgrade — ADX-based regime router.
-# Routes per-strategy weight: trend regimes favor breakout, chop favors SMC.
+# =============================================================================
+# REGIME ROUTER — ADX-based per-strategy weighting
+# =============================================================================
 regime:
   enabled: true
   adx_period: 14
@@ -93,46 +115,72 @@ regime:
     high_vol:   { breakout: 0.5, smc: 0.5 }
     unknown:    { breakout: 0.0, smc: 0.0 }
 
-strategy:
-  name: breakout_trend
-  timeframe_entry: 15m
-  timeframe_trend: 1h
-  ema_fast: 50
-  ema_slow: 200
-  atr_period: 14
-  atr_min: 10.0                        # Locked from sweep (Config #1)
-  atr_pct_min: 0.5                     # only trade when vol >= 50th pctile
-  min_trend_strength: 0.0              # disabled — vol filter is enough
-
-  # P4: 4H trend gate. When true, entry also requires 4H EMA stack alignment
-  #     (BUY: 4H ema_fast > ema_slow; SELL: mirror). Removes counter-trend trades.
-  use_4h_trend_gate: true
-
-reporting:
-  daily_summary_hour_ist: 23           # P3: send daily recap at 23:55 IST
-  daily_summary_minute_ist: 55
-
+# =============================================================================
+# STOPS (shared default — strategies can override)
+# =============================================================================
 stops:
   k_sl: 1.5                            # SL = entry +/- k_sl * ATR
-  k_tp: 2.5                            # TP = entry +/- k_tp * ATR  (RR 1:1.67)
+  k_tp: 2.5                            # TP = entry +/- k_tp * ATR (RR 1:1.67)
 
-execution:
-  broker: paper                        # paper | upstox   (upstox for live)
-  mode: backtest                       # backtest | paper | auto
-  spread_inr: 1.0                      # MCX gold tick = ₹1 (1 paisa per gram)
-  slippage_inr: 1.0
-  commission_inr_per_lot: 25.0         # Upstox MCX brokerage estimate; tune to plan
+# =============================================================================
+# PER-STRATEGY PARAMS
+# =============================================================================
+strategies:
+  # ----- Breakout-trend bot (mt5_live.py) -----
+  breakout:
+    magic: 20260522                    # MT5 magic — never change without account migration
+    ema_fast: 50
+    ema_slow: 200
+    atr_period: 14
+    atr_min: 10.0                      # absolute ATR floor — skip if below
+    atr_pct_min: 0.25                  # percentile floor (loosened from 0.5)
+    min_trend_strength: 0.0            # 0 = disabled
+    use_4h_trend_gate: false           # loosened — was the strictest condition
+    k_sl: 1.5                          # overrides global stops.k_sl if present
+    k_tp: 2.5
 
-upstox:
-  environment: live                    # 'live' for MCX (no sandbox for commodities)
-  api_key: ${UPSTOX_API_KEY}           # env var, never committed
-  api_secret: ${UPSTOX_API_SECRET}     # env var, never committed
-  redirect_uri: http://127.0.0.1:5000/callback
-  max_account_equity_inr: 50000        # HARD CAP — refuse new orders above this.
-                                       # Small-account guard. Raise only after
-                                       # forward-validation at the new size.
+  # ----- SMC (Smart Money Concepts) bot (mt5_smc.py) -----
+  smc:
+    magic: 20260601
+    htf_pivot: 2                       # 1H swing sensitivity
+    ltf_pivot: 2                       # 15m swing sensitivity
+    min_impulse_bars: 3
+    poi_freshness_bars: 60             # POIs valid ~10 days on H1
+    min_poi_score: 2                   # accept OB+FVG overlap alone
+    sl_buffer_atr_frac: 0.25           # SL = POI edge ± 0.25*ATR
+    require_ltf_choch: false           # loosened — accept POI mitigation alone
+    min_rr: 1.5                        # refuse trades with RR < 1.5
+    atr_period: 14
+    max_structure_lookback_bars: 300   # O(1) cap on structure analysis
 
-journal_path: ./data/trade_journal.csv
-event_log_path: ./data/events.jsonl
-sound_dir: ./assets/sounds
-dashboard_port: 8501
+# =============================================================================
+# ML META-LABELER (shadow mode by default)
+# =============================================================================
+ml:
+  enabled: true                        # if false, ML scoring path is skipped
+  shadow_mode: true                    # true = log decisions, don't act
+                                       # false = ML can veto trades (only set
+                                       # after shadow data validates the model)
+  model_path: ./models/meta_labeler.pkl
+  meta_path: ./models/meta_labeler.meta.json
+
+# =============================================================================
+# DAILY REPORTING
+# =============================================================================
+reporting:
+  daily_summary_hour_ist: 23
+  daily_summary_minute_ist: 55
+
+# =============================================================================
+# JOURNAL PATHS (CSV backup, even when Postgres is enabled)
+# =============================================================================
+journals:
+  breakout: ./data/mt5_trades.csv
+  smc:      ./data/mt5_smc_trades.csv
+
+# =============================================================================
+# OPS
+# =============================================================================
+dashboard:
+  port: 8501
+  password_env: DASHBOARD_PASSWORD

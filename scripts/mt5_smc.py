@@ -69,42 +69,45 @@ BOT_NAME = "smc"
 
 
 # ============================== CONFIG ===============================
-SYMBOL = "GOLD.i#"
-MAGIC = 20260601                 # distinct from breakout bot (20260522)
-POLL_SECONDS = 60
+# All knobs from config.yaml + .env via _config_loader.
+from _config_loader import load_config  # noqa: E402
+
+CFG = load_config("smc")
+
+# --- MT5 / symbol ---
+SYMBOL = CFG.mt5.symbol
+MAGIC = CFG.strategy.magic
+POLL_SECONDS = CFG.mt5.poll_seconds
 
 # --- risk + capital control ---
-RISK_PER_TRADE_PCT = 0.02
-DAILY_LOSS_CAP_PCT = 0.03
-MAX_DD_PCT = 0.15
-COOLDOWN_AFTER_N_LOSSES = 2
-COOLDOWN_MINUTES_LOSSES = 240
-REENTRY_BLOCK_MIN = 120
-
-USE_KELLY = True
-USE_REGIME_WEIGHT = True
+RISK_PER_TRADE_PCT = CFG.risk.risk_per_trade_pct
+DAILY_LOSS_CAP_PCT = CFG.risk.daily_loss_cap_pct
+MAX_DD_PCT = CFG.risk.max_drawdown_pct
+COOLDOWN_AFTER_N_LOSSES = CFG.risk.cooldown_after_consecutive_losses
+COOLDOWN_MINUTES_LOSSES = CFG.risk.cooldown_minutes_after_losses
+REENTRY_BLOCK_MIN = CFG.risk.reentry_block_minutes
+USE_KELLY = CFG.risk.kelly.enabled
+USE_REGIME_WEIGHT = CFG.regime.enabled
 
 # --- SMC params ---
-# 2026-05-28: LOOSENED for trade frequency — ran 1 week with 0 entries.
-# Tighten back if win rate craters below 40%.
-HTF_PIVOT = 2                    # 1H swing sensitivity
-LTF_PIVOT = 2                    # 15m swing sensitivity
-MIN_IMPULSE_BARS = 3
-POI_FRESHNESS_BARS = 60          # was 30 — POIs stay valid ~10 days on H1
-MIN_POI_SCORE = 2                # was 3 — accept OB+FVG overlap alone (no bonus required)
-SL_BUFFER_ATR_FRAC = 0.25
-REQUIRE_LTF_CHOCH = False        # was True — enter on POI mitigation alone (no 15m struct)
-MIN_RR = 1.5
-ATR_PERIOD = 14
-MAX_STRUCTURE_LOOKBACK_BARS = 300
+HTF_PIVOT = CFG.strategy.htf_pivot
+LTF_PIVOT = CFG.strategy.ltf_pivot
+MIN_IMPULSE_BARS = CFG.strategy.min_impulse_bars
+POI_FRESHNESS_BARS = CFG.strategy.poi_freshness_bars
+MIN_POI_SCORE = CFG.strategy.min_poi_score
+SL_BUFFER_ATR_FRAC = CFG.strategy.sl_buffer_atr_frac
+REQUIRE_LTF_CHOCH = CFG.strategy.require_ltf_choch
+MIN_RR = CFG.strategy.min_rr
+ATR_PERIOD = CFG.strategy.atr_period
+MAX_STRUCTURE_LOOKBACK_BARS = CFG.strategy.max_structure_lookback_bars
 
 # --- daily summary timing (IST) ---
-SUMMARY_HOUR_IST = 23
-SUMMARY_MIN_IST = 55
+SUMMARY_HOUR_IST = CFG.reporting.daily_summary_hour_ist
+SUMMARY_MIN_IST = CFG.reporting.daily_summary_minute_ist
 
 # --- files ---
 STATE_FILE = HERE / ".mt5_smc_state.json"
-TRADES_CSV = HERE / "data" / "mt5_smc_trades.csv"
+TRADES_CSV = HERE / CFG.journal_csv.lstrip("./")
 TRADES_CSV.parent.mkdir(exist_ok=True)
 TRADE_COLS = [
     "trade_id", "open_time", "close_time", "side", "entry", "exit",
@@ -113,8 +116,8 @@ TRADE_COLS = [
     "regime", "news_bias", "news_score",
 ]
 
-CALENDAR_PATH = HERE / "data" / "economic_calendar.json"
-NEWS_CACHE = HERE / "data" / ".av_news_cache.json"
+CALENDAR_PATH = HERE / CFG.calendar.path.lstrip("./")
+NEWS_CACHE = HERE / CFG.news.cache_path.lstrip("./")
 
 
 # ============================== HELPERS ==============================
@@ -583,8 +586,31 @@ def get_equity() -> float:
 
 # ============================ GATES ==================================
 def can_open_new_trade(state: dict, side: str, gate_cfg: GateConfig):
-    """Composite gate. Returns (allowed, reason, news_summary_or_None)."""
+    """Composite gate. Returns (allowed, reason, news_summary_or_None).
+
+    Order: max-DD kill-switch → daily loss cap → cooldown → reentry → composite → news.
+    """
     now = _now_utc()
+
+    # === Max DD kill-switch (HARD halt — needs manual peak_equity reset) ===
+    equity = get_equity()
+    peak = state.get("peak_equity")
+    if equity and peak and peak > 0:
+        dd = (peak - equity) / peak
+        if dd >= MAX_DD_PCT:
+            return False, (f"MAX_DD_KILL_SWITCH: drawdown {dd*100:.2f}% "
+                           f">= cap {MAX_DD_PCT*100:.0f}% (peak ${peak:,.2f}, eq ${equity:,.2f}). "
+                           f"Manual reset of .mt5_smc_state.json required."), None
+
+    # === Daily loss cap (HARD for the day, resets at UTC midnight) ===
+    pnl_today = state.get("pnl_today_usd", 0.0)
+    if equity and pnl_today < 0:
+        loss_pct_today = abs(pnl_today) / equity
+        if loss_pct_today >= DAILY_LOSS_CAP_PCT:
+            return False, (f"DAILY_LOSS_CAP: today ${pnl_today:+.2f} "
+                           f"= {loss_pct_today*100:.2f}% >= cap "
+                           f"{DAILY_LOSS_CAP_PCT*100:.1f}%"), None
+
     cu = _parse_iso(state.get("cooldown_until_iso"))
     if cu and now < cu:
         mins = int((cu - now).total_seconds() // 60)
@@ -932,6 +958,7 @@ def main() -> int:
 
     log(f"MT5 SMC bot started.  account={info.login}  server={info.server}  "
         f"equity=${eq0:,.2f}  symbol={SYMBOL}  magic={MAGIC}")
+    CFG.print_summary()
     tg_send(
         f"<b>[SMC BOT START — MT5/XM]</b>\n"
         f"Account: {info.login}\nEquity: ${eq0:,.2f}\n"

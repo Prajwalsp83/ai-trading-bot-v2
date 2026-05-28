@@ -59,45 +59,51 @@ BOT_NAME = "breakout"
 
 
 # ============================== CONFIG ===============================
-SYMBOL = "GOLD.i#"
-MAGIC = 20260522        # so we never touch positions other code/humans placed
-POLL_SECONDS = 60
+# All knobs loaded from config.yaml + .env via _config_loader.
+# Compat aliases below keep the rest of the bot unchanged — the names
+# `RISK_PER_TRADE_PCT`, `MAGIC` etc still work but now resolve from config.
+from _config_loader import load_config  # noqa: E402
+
+CFG = load_config("breakout")
+
+# --- MT5 / symbol ---
+SYMBOL = CFG.mt5.symbol
+MAGIC = CFG.strategy.magic
+POLL_SECONDS = CFG.mt5.poll_seconds
 
 # --- risk + capital control ---
-RISK_PER_TRADE_PCT = 0.02
-DD_SCALE_THRESHOLD = 0.03
-DD_SCALE_FACTOR = 0.5
-DAILY_LOSS_CAP_PCT = 0.03
-MAX_DD_PCT = 0.15
-COOLDOWN_AFTER_N_LOSSES = 2
-COOLDOWN_MINUTES_LOSSES = 240
-REENTRY_BLOCK_MIN = 120
+RISK_PER_TRADE_PCT = CFG.risk.risk_per_trade_pct
+DAILY_LOSS_CAP_PCT = CFG.risk.daily_loss_cap_pct
+MAX_DD_PCT = CFG.risk.max_drawdown_pct
+COOLDOWN_AFTER_N_LOSSES = CFG.risk.cooldown_after_consecutive_losses
+COOLDOWN_MINUTES_LOSSES = CFG.risk.cooldown_minutes_after_losses
+REENTRY_BLOCK_MIN = CFG.risk.reentry_block_minutes
+USE_KELLY = CFG.risk.kelly.enabled
+USE_REGIME_WEIGHT = CFG.regime.enabled
 
 # --- strategy params ---
-# 2026-05-28: LOOSENED from Config #1 to get trades — bot ran 1 week with 0 entries.
-# Tighten back if win rate craters below 40%.
-EMA_FAST = 50
-EMA_SLOW = 200
-ATR_PERIOD = 14
-ATR_MIN = 10.0
-ATR_PCT_MIN = 0.25      # was 0.5 — accept 25th+ percentile vol (gold has been low-vol)
-MIN_TREND_STRENGTH = 0.0
-K_SL = 1.5
-K_TP = 2.5
-USE_4H_GATE = False     # was True — 4H gate was the strictest, blocking nearly all entries
+EMA_FAST = CFG.strategy.ema_fast
+EMA_SLOW = CFG.strategy.ema_slow
+ATR_PERIOD = CFG.strategy.atr_period
+ATR_MIN = CFG.strategy.atr_min
+ATR_PCT_MIN = CFG.strategy.atr_pct_min
+MIN_TREND_STRENGTH = CFG.strategy.min_trend_strength
+K_SL = CFG.strategy.k_sl
+K_TP = CFG.strategy.k_tp
+USE_4H_GATE = CFG.strategy.use_4h_trend_gate
 
-# --- telegram ---
-TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
+# --- telegram (still from env directly for module-level helpers) ---
+TG_TOKEN = CFG.telegram.bot_token
+TG_CHAT = CFG.telegram.chat_id
 
 # --- daily summary timing (IST) ---
 IST = timezone(timedelta(hours=5, minutes=30))
-SUMMARY_HOUR_IST = 23
-SUMMARY_MIN_IST = 55
+SUMMARY_HOUR_IST = CFG.reporting.daily_summary_hour_ist
+SUMMARY_MIN_IST = CFG.reporting.daily_summary_minute_ist
 
 # --- files ---
 STATE_FILE = HERE / ".mt5_state.json"
-TRADES_CSV = HERE / "data" / "mt5_trades.csv"
+TRADES_CSV = HERE / CFG.journal_csv.lstrip("./")
 TRADES_CSV.parent.mkdir(exist_ok=True)
 TRADE_COLS = [
     "trade_id", "open_time", "close_time", "side", "entry", "exit",
@@ -105,11 +111,9 @@ TRADE_COLS = [
     "atr_at_entry", "exit_reason", "ticket",
 ]
 
-# Pro upgrade — shared with mt5_smc.py
-CALENDAR_PATH = HERE / "data" / "economic_calendar.json"
-NEWS_CACHE = HERE / "data" / ".av_news_cache.json"
-USE_KELLY = True
-USE_REGIME_WEIGHT = True
+# Calendar + news cache paths
+CALENDAR_PATH = HERE / CFG.calendar.path.lstrip("./")
+NEWS_CACHE = HERE / CFG.news.cache_path.lstrip("./")
 
 
 # ============================== HELPERS ==============================
@@ -354,17 +358,50 @@ def _build_gate_config() -> GateConfig:
 def can_open_new_trade(state: dict, side: str | None = None, gate_cfg: GateConfig | None = None):
     """Composite gate. Returns (allowed, reason, news_summary_or_None).
 
-    Legacy single-tuple call still supported via `side=None` (skips news check).
+    Order of checks (cheapest + most-impactful first):
+      1. Max-DD kill-switch (HARD halt — bot won't trade until peak resets)
+      2. Daily loss cap (HARD halt for the day)
+      3. Cooldown after consecutive losses
+      4. Reentry block after any exit
+      5. Composite pre-signal gates (sessions / calendar)
+      6. Directional news gate (sentiment vs trade direction)
     """
     now = _now_utc()
+
+    # === 1. MAX DRAWDOWN KILL-SWITCH (HARD) ===
+    # Equity has fallen >= MAX_DD_PCT below peak. Bot refuses new trades.
+    # Requires MANUAL reset of state["peak_equity"] to recover.
+    equity = get_equity() if 'get_equity' in globals() else None
+    peak = state.get("peak_equity")
+    if equity and peak and peak > 0:
+        dd = (peak - equity) / peak
+        if dd >= MAX_DD_PCT:
+            return False, (f"MAX_DD_KILL_SWITCH: drawdown {dd*100:.2f}% "
+                           f">= cap {MAX_DD_PCT*100:.0f}% (peak ${peak:,.2f}, eq ${equity:,.2f}). "
+                           f"Manual reset of .mt5_state.json required."), None
+
+    # === 2. DAILY LOSS CAP (HARD for the day) ===
+    pnl_today = state.get("pnl_today_usd", 0.0)
+    if equity and pnl_today < 0:
+        loss_pct_today = abs(pnl_today) / equity
+        if loss_pct_today >= DAILY_LOSS_CAP_PCT:
+            return False, (f"DAILY_LOSS_CAP: today ${pnl_today:+.2f} "
+                           f"= {loss_pct_today*100:.2f}% >= cap "
+                           f"{DAILY_LOSS_CAP_PCT*100:.1f}%. Resets at UTC midnight."), None
+
+    # === 3. Cooldown after consecutive losses ===
     cu = _parse_iso(state.get("cooldown_until_iso"))
     if cu and now < cu:
         mins = int((cu - now).total_seconds() // 60)
         return False, f"loss_cooldown ({mins}m left, {state.get('consecutive_losses',0)} losses)", None
+
+    # === 4. Reentry block after any exit ===
     le = _parse_iso(state.get("last_exit_iso"))
     if le and (now - le) < timedelta(minutes=REENTRY_BLOCK_MIN):
         mins = int((timedelta(minutes=REENTRY_BLOCK_MIN) - (now - le)).total_seconds() // 60)
         return False, f"reentry_block ({mins}m left)", None
+
+    # === 5+6. Composite gates (sessions, calendar, news) ===
     if gate_cfg is not None:
         ok, why = composite_pre_signal_gate(gate_cfg)
         if not ok:
@@ -789,6 +826,7 @@ def main() -> int:
 
     log(f"MT5 paper bot started.  account={info.login}  server={info.server}  "
         f"equity=${eq0:,.2f}  symbol={SYMBOL}")
+    CFG.print_summary()
     tg_send(
         f"<b>[BOT START — MT5/XM]</b>\n"
         f"Account: {info.login} ({info.server})\n"
