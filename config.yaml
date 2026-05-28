@@ -31,6 +31,9 @@ postgres:
 risk:
   # === Per-trade sizing ===
   risk_per_trade_pct: 0.01            # 1% of equity max per trade
+                                       # NOTE: cannot drop below 1% on $988 account
+                                       # without lot size rounding to 0 (XM min 0.01 lot).
+                                       # When equity > $2000, can reduce to 0.005.
   max_concurrent_positions: 1         # per bot — total 2 across breakout+smc
 
   # === Daily + total kill-switches ===
@@ -101,6 +104,19 @@ news:
 # =============================================================================
 # REGIME ROUTER — ADX-based per-strategy weighting
 # =============================================================================
+# Phase C update (2026-05-29) based on walk-forward analysis:
+#
+# 1. BREAKOUT DISABLED — all weights set to 0. Walk-forward showed only 2/9
+#    positive windows over 4 years, PF 1.04 (statistical noise). No edge.
+#    Code still runs, but every trade gets halted by risk layer (regime=0).
+#    Kept active to log signals for future research / ML training.
+#
+# 2. SMC WEIGHTS FLIPPED — walk-forward exposed that SMC's edge comes from
+#    catching trending moves to next swing high/low. It LOSES in chop.
+#    Previous config assumed SMC = mean reversion (wrong). New config:
+#       trends -> SMC full size (1.0)
+#       chop   -> SMC halted (0.0)
+#       transition / high_vol / unknown -> partial size, safer
 regime:
   enabled: true
   adx_period: 14
@@ -108,12 +124,12 @@ regime:
   adx_chop_max: 20.0
   high_vol_pct: 0.95
   weights:
-    trend_up:   { breakout: 1.0, smc: 0.3 }
-    trend_down: { breakout: 1.0, smc: 0.3 }
-    chop:       { breakout: 0.0, smc: 1.0 }
-    transition: { breakout: 0.5, smc: 0.5 }
-    high_vol:   { breakout: 0.5, smc: 0.5 }
-    unknown:    { breakout: 0.0, smc: 0.0 }
+    trend_up:   { breakout: 0.0, smc: 1.0 }   # smc thrives in uptrends
+    trend_down: { breakout: 0.0, smc: 1.0 }   # smc thrives in downtrends
+    chop:       { breakout: 0.0, smc: 0.0 }   # smc chops out; nothing trades
+    transition: { breakout: 0.0, smc: 0.5 }   # partial — wait for clarity
+    high_vol:   { breakout: 0.0, smc: 0.5 }   # partial — manage risk
+    unknown:    { breakout: 0.0, smc: 0.0 }   # don't trade what we don't classify
 
 # =============================================================================
 # STOPS (shared default — strategies can override)
@@ -140,18 +156,22 @@ strategies:
     k_tp: 2.5
 
   # ----- SMC (Smart Money Concepts) bot (mt5_smc.py) -----
+  # Phase C update (2026-05-29): switched to 'aggressive_all' params from
+  # the parameter sweep. Backtest on 4.24 years showed PF 1.89, Sharpe 0.89,
+  # 185 trades, max DD 13.57% — survived 2022 sell-off. CAVEAT: recent 12
+  # months (2025-Mar onwards) showed -7R cumulative. Monitor closely.
   smc:
     magic: 20260601
-    htf_pivot: 2                       # 1H swing sensitivity
-    ltf_pivot: 2                       # 15m swing sensitivity
-    min_impulse_bars: 3
-    poi_freshness_bars: 60             # POIs valid ~10 days on H1
-    min_poi_score: 2                   # accept OB+FVG overlap alone
-    sl_buffer_atr_frac: 0.25           # SL = POI edge ± 0.25*ATR
-    require_ltf_choch: false           # loosened — accept POI mitigation alone
-    min_rr: 1.5                        # refuse trades with RR < 1.5
+    htf_pivot: 1                       # more sensitive swing detection (was 2)
+    ltf_pivot: 2
+    min_impulse_bars: 2                # accept 2-bar impulses for OBs (was 3)
+    poi_freshness_bars: 120            # POIs valid ~20 days on H1 (was 60)
+    min_poi_score: 1                   # accept standalone OB or FVG (was 2)
+    sl_buffer_atr_frac: 0.25
+    require_ltf_choch: false
+    min_rr: 1.0                        # accept 1:1 RR setups (was 1.5)
     atr_period: 14
-    max_structure_lookback_bars: 300   # O(1) cap on structure analysis
+    max_structure_lookback_bars: 300
 
 # =============================================================================
 # ML META-LABELER (shadow mode by default)
