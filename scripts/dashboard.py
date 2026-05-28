@@ -34,8 +34,14 @@ HERE = Path(__file__).resolve().parent.parent
 load_dotenv(HERE / ".env")
 load_dotenv(HERE / "scripts" / ".env")     # if .env lives next to scripts
 
-REFRESH_SECONDS = 60
-CACHE_TTL = 30   # seconds — DB queries cached this long
+# Tuning for speed:
+# - REFRESH_SECONDS: how often the whole page reloads
+# - LIVE_CACHE_TTL: short cache for things that change every cycle (KPIs, position)
+# - SLOW_CACHE_TTL: longer cache for things that change rarely (trades, daily P&L)
+REFRESH_SECONDS = 120          # 2 min — bots only write equity every 5 min anyway
+LIVE_CACHE_TTL = 30            # 30s for fast-changing data
+SLOW_CACHE_TTL = 180           # 3 min for slow-changing data
+LIST_CACHE_TTL = 300           # 5 min for historical / aggregate data
 
 st.set_page_config(
     page_title="AI Trading Bot",
@@ -43,6 +49,32 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+
+# ============================== AUTH ================================
+def _check_password() -> bool:
+    """Gate the dashboard behind a password (env var DASHBOARD_PASSWORD).
+    If env var isn't set (local dev), skip the gate."""
+    expected = os.getenv("DASHBOARD_PASSWORD")
+    if not expected:
+        return True  # no password configured = open dashboard
+
+    if st.session_state.get("auth_ok"):
+        return True
+
+    st.title("🔒 AI Gold Trading Bot")
+    pwd = st.text_input("Password", type="password",
+                         help="Set via DASHBOARD_PASSWORD in .env on the host running this dashboard.")
+    if pwd == expected:
+        st.session_state["auth_ok"] = True
+        st.rerun()
+    elif pwd:
+        st.error("Wrong password.")
+    return False
+
+
+if not _check_password():
+    st.stop()
 
 
 # ============================== DB ==================================
@@ -81,7 +113,7 @@ def fetch_df(sql: str, params: tuple = ()) -> pd.DataFrame:
         return pd.read_sql_query(sql, conn, params=params)
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=LIVE_CACHE_TTL)
 def q_latest_equity() -> pd.DataFrame:
     return fetch_df("""
         SELECT account, equity, balance, peak_equity, dd_pct, open_positions, ts
@@ -90,7 +122,7 @@ def q_latest_equity() -> pd.DataFrame:
     """)
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=SLOW_CACHE_TTL)
 def q_equity_curve(days: int = 30) -> pd.DataFrame:
     return fetch_df("""
         SELECT ts, equity, balance, dd_pct
@@ -100,7 +132,7 @@ def q_equity_curve(days: int = 30) -> pd.DataFrame:
     """, (f"{days} days",))
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=LIST_CACHE_TTL)
 def q_bot_starts() -> pd.DataFrame:
     return fetch_df("""
         SELECT bot_name, ts, payload->>'equity' AS equity
@@ -111,7 +143,7 @@ def q_bot_starts() -> pd.DataFrame:
     """)
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=SLOW_CACHE_TTL)
 def q_recent_trades(n: int = 50) -> pd.DataFrame:
     return fetch_df("""
         SELECT id, bot_name, magic, trade_id, side, symbol,
@@ -124,7 +156,7 @@ def q_recent_trades(n: int = 50) -> pd.DataFrame:
     """, (n,))
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=LIST_CACHE_TTL)
 def q_daily_pnl() -> pd.DataFrame:
     return fetch_df("""
         SELECT bot_name, day, trades, pnl_usd, r_total, wins, losses
@@ -134,7 +166,7 @@ def q_daily_pnl() -> pd.DataFrame:
     """)
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=SLOW_CACHE_TTL)
 def q_signal_funnel(hours: int = 24) -> pd.DataFrame:
     return fetch_df("""
         SELECT bot_name, severity, COUNT(*) AS n
@@ -145,7 +177,7 @@ def q_signal_funnel(hours: int = 24) -> pd.DataFrame:
     """, (f"{hours} hours",))
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=LIST_CACHE_TTL)
 def q_rejection_counts() -> pd.DataFrame:
     return fetch_df("""
         SELECT bot_name, rejection_reason, n, first_seen, last_seen
@@ -154,7 +186,7 @@ def q_rejection_counts() -> pd.DataFrame:
     """)
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=LIST_CACHE_TTL)
 def q_regime_timeline(hours: int = 72) -> pd.DataFrame:
     return fetch_df("""
         SELECT bot_name, regime, COUNT(*) AS n
@@ -165,7 +197,7 @@ def q_regime_timeline(hours: int = 72) -> pd.DataFrame:
     """, (f"{hours} hours",))
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=SLOW_CACHE_TTL)
 def q_trade_summary() -> pd.DataFrame:
     return fetch_df("""
         SELECT bot_name,
@@ -183,7 +215,7 @@ def q_trade_summary() -> pd.DataFrame:
 
 # === Dashboard v2 queries ===
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=LIST_CACHE_TTL)
 def q_hourly_heatmap(hours: int = 168) -> pd.DataFrame:
     """Signal counts per hour-of-day per severity for last N hours."""
     return fetch_df("""
@@ -197,7 +229,7 @@ def q_hourly_heatmap(hours: int = 168) -> pd.DataFrame:
     """, (f"{hours} hours",))
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=LIST_CACHE_TTL)
 def q_r_distribution() -> pd.DataFrame:
     """R-multiple per closed trade for histogram."""
     return fetch_df("""
@@ -208,7 +240,7 @@ def q_r_distribution() -> pd.DataFrame:
     """)
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=LIST_CACHE_TTL)
 def q_session_activity(hours: int = 168) -> pd.DataFrame:
     """Signal + entry activity by session over the last N hours.
     Sessions: London (12:30-16:30 IST = 07:00-11:00 UTC),
@@ -231,7 +263,7 @@ def q_session_activity(hours: int = 168) -> pd.DataFrame:
     """, (f"{hours} hours",))
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=SLOW_CACHE_TTL)
 def q_blocked_entries(n: int = 20) -> pd.DataFrame:
     """Last N signals that were ready-to-fire but didn't make it to a trade
     (severity ended up as SKIPPED or there's an explicit rejection_reason)."""
@@ -246,7 +278,7 @@ def q_blocked_entries(n: int = 20) -> pd.DataFrame:
     """, (n,))
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=LIVE_CACHE_TTL)
 def q_open_position() -> pd.DataFrame:
     """If there are open positions (snapshots show open_positions > 0), show details."""
     return fetch_df("""
@@ -258,7 +290,7 @@ def q_open_position() -> pd.DataFrame:
     """)
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=SLOW_CACHE_TTL)
 def q_recent_loss_streak() -> pd.DataFrame:
     """For each bot: current loss streak (consecutive losses ending most recently)."""
     return fetch_df("""
@@ -278,7 +310,7 @@ def q_recent_loss_streak() -> pd.DataFrame:
     """)
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=LIST_CACHE_TTL)
 def q_cooldown_events(hours: int = 168) -> pd.DataFrame:
     """Recent gate-block events from logs (watchdog, cooldown, regime halt)."""
     return fetch_df("""
@@ -297,21 +329,37 @@ def metric_card(col, label: str, value, delta=None, help=None):
         st.metric(label, value, delta=delta, help=help)
 
 
-# --- Auto-refresh ---
-st_autorefresh_count = st.empty()
-st.markdown(
-    f"<script>setTimeout(function(){{window.location.reload();}}, {REFRESH_SECONDS*1000});</script>",
-    unsafe_allow_html=True,
-)
+# --- Auto-refresh (lightweight: Streamlit's native re-run, not full page reload) ---
+# Uses streamlit-autorefresh if installed; otherwise falls back to lighter JS reload.
+try:
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=REFRESH_SECONDS * 1000, key="dashboard_autorefresh")
+except ImportError:
+    # Fallback: lighter version — only reloads if user is active (not background tab)
+    st.markdown(
+        f"<script>if(!document.hidden){{setTimeout(()=>window.location.reload(), {REFRESH_SECONDS*1000});}}</script>",
+        unsafe_allow_html=True,
+    )
 
 # --- Header ---
-st.title("📈 AI Gold Trading Bot")
-last_eq = q_latest_equity()
+hdr_l, hdr_r = st.columns([5, 1])
+with hdr_l:
+    st.title("📈 AI Gold Trading Bot")
+with hdr_r:
+    if st.button("🔄 Refresh now", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+with st.spinner("Loading live state..."):
+    last_eq = q_latest_equity()
+
 if not last_eq.empty:
     e = last_eq.iloc[0]
     age = datetime.now(timezone.utc) - pd.to_datetime(e["ts"]).to_pydatetime()
     age_str = f"{int(age.total_seconds())}s ago" if age.total_seconds() < 120 else f"{int(age.total_seconds()/60)}m ago"
-    st.caption(f"Account `{e['account']}` · last update {age_str} · refresh every {REFRESH_SECONDS}s")
+    st.caption(f"Account `{e['account']}` · last update {age_str} · "
+                f"page refresh every {REFRESH_SECONDS}s · "
+                f"live cache {LIVE_CACHE_TTL}s · table cache {LIST_CACHE_TTL}s")
 else:
     st.warning("No equity snapshots yet — bots may not have written to DB.")
 
