@@ -1,0 +1,28 @@
+# Core
+pandas
+numpy
+pyyaml
+python-dateutil
+
+# Data + execution
+yfinance                 # historical backtest data fallback
+upstox-python-sdk        # Upstox v2 official SDK (REST + websocket)
+flask                    # local OAuth callback listener (one route)
+python-dotenv            # load .env file
+
+# Indicators / ML
+ta
+scikit-learn
+joblib
+
+# Alerts
+requests                 # telegram
+# simpleaudio            # sound channel (pick one backend)
+# plyer                  # desktop notifications
+
+# UI
+streamlit
+plotly
+
+# Dev
+pytest

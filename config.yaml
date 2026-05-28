@@ -1,0 +1,138 @@
+# All user-tunable settings. No magic numbers in code.
+
+symbols:
+  - GOLDM         # MCX gold mini (100g lot) via Upstox
+
+poll_seconds: 60
+
+telegram:
+  bot_token: ${TELEGRAM_BOT_TOKEN}     # set in env, never committed
+  chat_id: "764593674"
+
+risk:
+  risk_per_trade_pct: 0.02             # 2% of equity per trade
+  daily_loss_cap_pct: 0.03             # halt new trades at -3% on the day
+  max_drawdown_pct: 0.15               # halt all at -15% from peak
+  max_concurrent_positions: 1
+
+  # P1: Consecutive-loss cooldown. After N SL hits in a row, block new entries
+  #     for cooldown_minutes_after_losses. Reset on any win.
+  cooldown_after_consecutive_losses: 2
+  cooldown_minutes_after_losses: 240   # 4 hours
+
+  # P2: Drawdown-scaled risk. When equity is below peak by dd_scale_threshold_pct,
+  #     multiply risk_per_trade_pct by dd_scale_factor until a new equity high.
+  dd_scale_threshold_pct: 0.03         # halve risk when DD >= 3% from peak
+  dd_scale_factor: 0.5
+
+  # P6 bonus: Block new trade for N minutes after any exit (win OR loss).
+  #     Prevents mechanical re-entry on the same setup.
+  reentry_block_minutes: 120
+
+  # Pro upgrade — 3-tier drawdown scaling (replaces P2 single-tier).
+  # Each tier: at >= threshold_pct DD from peak, apply multiplier to base risk.
+  # 0.0 multiplier HALTS new trades entirely until equity recovers.
+  dd_tiers:
+    - { threshold_pct: 0.12, multiplier: 0.0  }   # 12%+ DD: stop trading
+    - { threshold_pct: 0.07, multiplier: 0.25 }   # 7-12%: quarter size
+    - { threshold_pct: 0.03, multiplier: 0.50 }   # 3-7%: half size
+    - { threshold_pct: 0.0,  multiplier: 1.0  }   # 0-3%: full size
+
+  # Pro upgrade — fractional-Kelly sizing from rolling trade history.
+  # Multiplies into base risk after dd_tier multiplier.
+  kelly:
+    enabled: true
+    lookback_trades: 30           # rolling window for win-rate + avg R
+    fraction: 0.25                # quarter-Kelly (industry safety standard)
+    min_trades_required: 10       # use default until we have a sample
+    max_multiplier: 2.0           # cap on hot streak
+    min_multiplier: 0.25          # floor on cold streak
+    default_multiplier: 1.0       # when sample is too small
+
+# Pro upgrade — trading session filter (IST, gold-focused)
+sessions:
+  enabled: true
+  block_weekend: true
+  windows:
+    - { name: "London",       start_ist: "12:30", end_ist: "16:30" }
+    - { name: "NY_overlap",   start_ist: "18:00", end_ist: "21:00" }
+    - { name: "NY_afternoon", start_ist: "21:00", end_ist: "23:30" }
+
+# Pro upgrade — economic calendar block (high-impact USD events)
+calendar:
+  enabled: true
+  path: ./data/economic_calendar.json
+  before_minutes: 30
+  after_minutes: 60
+  impact_threshold: high
+  currencies: ["USD"]
+
+# Pro upgrade — Alpha Vantage news sentiment.
+# Free key: https://www.alphavantage.co/support/#api-key
+# Set ALPHA_VANTAGE_KEY env var (in .env file).
+news:
+  enabled: true
+  cache_path: ./data/.av_news_cache.json
+  cache_ttl_minutes: 25
+  max_age_hours: 6
+  block_threshold: 0.35           # block BUY if sentiment < -0.35, SELL if > +0.35
+
+# Pro upgrade — ADX-based regime router.
+# Routes per-strategy weight: trend regimes favor breakout, chop favors SMC.
+regime:
+  enabled: true
+  adx_period: 14
+  adx_trend_min: 25.0
+  adx_chop_max: 20.0
+  high_vol_pct: 0.95
+  weights:
+    trend_up:   { breakout: 1.0, smc: 0.3 }
+    trend_down: { breakout: 1.0, smc: 0.3 }
+    chop:       { breakout: 0.0, smc: 1.0 }
+    transition: { breakout: 0.5, smc: 0.5 }
+    high_vol:   { breakout: 0.5, smc: 0.5 }
+    unknown:    { breakout: 0.0, smc: 0.0 }
+
+strategy:
+  name: breakout_trend
+  timeframe_entry: 15m
+  timeframe_trend: 1h
+  ema_fast: 50
+  ema_slow: 200
+  atr_period: 14
+  atr_min: 10.0                        # Locked from sweep (Config #1)
+  atr_pct_min: 0.5                     # only trade when vol >= 50th pctile
+  min_trend_strength: 0.0              # disabled — vol filter is enough
+
+  # P4: 4H trend gate. When true, entry also requires 4H EMA stack alignment
+  #     (BUY: 4H ema_fast > ema_slow; SELL: mirror). Removes counter-trend trades.
+  use_4h_trend_gate: true
+
+reporting:
+  daily_summary_hour_ist: 23           # P3: send daily recap at 23:55 IST
+  daily_summary_minute_ist: 55
+
+stops:
+  k_sl: 1.5                            # SL = entry +/- k_sl * ATR
+  k_tp: 2.5                            # TP = entry +/- k_tp * ATR  (RR 1:1.67)
+
+execution:
+  broker: paper                        # paper | upstox   (upstox for live)
+  mode: backtest                       # backtest | paper | auto
+  spread_inr: 1.0                      # MCX gold tick = ₹1 (1 paisa per gram)
+  slippage_inr: 1.0
+  commission_inr_per_lot: 25.0         # Upstox MCX brokerage estimate; tune to plan
+
+upstox:
+  environment: live                    # 'live' for MCX (no sandbox for commodities)
+  api_key: ${UPSTOX_API_KEY}           # env var, never committed
+  api_secret: ${UPSTOX_API_SECRET}     # env var, never committed
+  redirect_uri: http://127.0.0.1:5000/callback
+  max_account_equity_inr: 50000        # HARD CAP — refuse new orders above this.
+                                       # Small-account guard. Raise only after
+                                       # forward-validation at the new size.
+
+journal_path: ./data/trade_journal.csv
+event_log_path: ./data/events.jsonl
+sound_dir: ./assets/sounds
+dashboard_port: 8501
