@@ -826,7 +826,10 @@ def main() -> int:
 
     log(f"MT5 paper bot started.  account={info.login}  server={info.server}  "
         f"equity=${eq0:,.2f}  symbol={SYMBOL}")
-    CFG.print_summary()
+    try:
+        CFG.print_summary()
+    except Exception as e:
+        log(f"print_summary error (non-fatal): {e}")
     tg_send(
         f"<b>[BOT START — MT5/XM]</b>\n"
         f"Account: {info.login} ({info.server})\n"

@@ -208,35 +208,40 @@ class BotConfig:
     journal_csv: str
 
     def print_summary(self) -> None:
-        """Single line per concern so bot startup log shows everything."""
-        print(f"[config] strategy={self.strategy_name} "
-              f"magic={self.strategy.magic} symbol={self.mt5.symbol}", flush=True)
-        print(f"[config] risk: {self.risk.risk_per_trade_pct*100:.2f}%/trade "
-              f"daily_cap={self.risk.daily_loss_cap_pct*100:.1f}% "
-              f"max_dd={self.risk.max_drawdown_pct*100:.0f}% "
-              f"cooldown={self.risk.cooldown_after_consecutive_losses}L→{self.risk.cooldown_minutes_after_losses}m "
-              f"reentry={self.risk.reentry_block_minutes}m", flush=True)
-        print(f"[config] dd_tiers: " + " | ".join(
-            f"≥{t.threshold_pct*100:.0f}%→×{t.multiplier:.2f}" for t in self.risk.dd_tiers), flush=True)
-        print(f"[config] kelly: enabled={self.risk.kelly.enabled} "
-              f"lookback={self.risk.kelly.lookback_trades} "
-              f"fraction={self.risk.kelly.fraction} "
-              f"cap=[×{self.risk.kelly.min_multiplier},×{self.risk.kelly.max_multiplier}]", flush=True)
-        print(f"[config] gates: sessions={self.sessions.enabled} "
-              f"calendar={self.calendar.enabled} news={self.news.enabled} "
-              f"regime={self.regime.enabled}", flush=True)
-        print(f"[config] ml: enabled={self.ml.enabled} shadow={self.ml.shadow_mode}", flush=True)
-        if isinstance(self.strategy, BreakoutParams):
-            s = self.strategy
-            print(f"[config] breakout: ema={s.ema_fast}/{s.ema_slow} atr={s.atr_period} "
-                  f"atr_min={s.atr_min} atr_pct_min={s.atr_pct_min} "
-                  f"4h_gate={s.use_4h_trend_gate} k_sl={s.k_sl} k_tp={s.k_tp}", flush=True)
-        else:
-            s = self.strategy
-            print(f"[config] smc: pivot=h{s.htf_pivot}/l{s.ltf_pivot} "
-                  f"poi_min={s.min_poi_score} fresh={s.poi_freshness_bars}b "
-                  f"sl_buf={s.sl_buffer_atr_frac}×atr require_choch={s.require_ltf_choch} "
-                  f"min_rr={s.min_rr}", flush=True)
+        """Single line per concern so bot startup log shows everything.
+        ASCII-only - Windows cp1252 console can't encode arrows/>=/x signs."""
+        try:
+            print(f"[config] strategy={self.strategy_name} "
+                  f"magic={self.strategy.magic} symbol={self.mt5.symbol}", flush=True)
+            print(f"[config] risk: {self.risk.risk_per_trade_pct*100:.2f}%/trade "
+                  f"daily_cap={self.risk.daily_loss_cap_pct*100:.1f}% "
+                  f"max_dd={self.risk.max_drawdown_pct*100:.0f}% "
+                  f"cooldown={self.risk.cooldown_after_consecutive_losses}L->{self.risk.cooldown_minutes_after_losses}m "
+                  f"reentry={self.risk.reentry_block_minutes}m", flush=True)
+            print(f"[config] dd_tiers: " + " | ".join(
+                f">={t.threshold_pct*100:.0f}%->x{t.multiplier:.2f}" for t in self.risk.dd_tiers), flush=True)
+            print(f"[config] kelly: enabled={self.risk.kelly.enabled} "
+                  f"lookback={self.risk.kelly.lookback_trades} "
+                  f"fraction={self.risk.kelly.fraction} "
+                  f"cap=[x{self.risk.kelly.min_multiplier},x{self.risk.kelly.max_multiplier}]", flush=True)
+            print(f"[config] gates: sessions={self.sessions.enabled} "
+                  f"calendar={self.calendar.enabled} news={self.news.enabled} "
+                  f"regime={self.regime.enabled}", flush=True)
+            print(f"[config] ml: enabled={self.ml.enabled} shadow={self.ml.shadow_mode}", flush=True)
+            if isinstance(self.strategy, BreakoutParams):
+                s = self.strategy
+                print(f"[config] breakout: ema={s.ema_fast}/{s.ema_slow} atr={s.atr_period} "
+                      f"atr_min={s.atr_min} atr_pct_min={s.atr_pct_min} "
+                      f"4h_gate={s.use_4h_trend_gate} k_sl={s.k_sl} k_tp={s.k_tp}", flush=True)
+            else:
+                s = self.strategy
+                print(f"[config] smc: pivot=h{s.htf_pivot}/l{s.ltf_pivot} "
+                      f"poi_min={s.min_poi_score} fresh={s.poi_freshness_bars}b "
+                      f"sl_buf={s.sl_buffer_atr_frac}xatr require_choch={s.require_ltf_choch} "
+                      f"min_rr={s.min_rr}", flush=True)
+        except Exception as e:
+            # NEVER crash the bot because of a logging issue
+            print(f"[config] print_summary failed: {type(e).__name__}: {e}", flush=True)
 
 
 # ============================== LOADER ==============================

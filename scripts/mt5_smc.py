@@ -958,7 +958,10 @@ def main() -> int:
 
     log(f"MT5 SMC bot started.  account={info.login}  server={info.server}  "
         f"equity=${eq0:,.2f}  symbol={SYMBOL}  magic={MAGIC}")
-    CFG.print_summary()
+    try:
+        CFG.print_summary()
+    except Exception as e:
+        log(f"print_summary error (non-fatal): {e}")
     tg_send(
         f"<b>[SMC BOT START — MT5/XM]</b>\n"
         f"Account: {info.login}\nEquity: ${eq0:,.2f}\n"
