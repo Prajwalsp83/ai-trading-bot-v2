@@ -84,6 +84,14 @@ class BacktestParams:
     k_tp: float = 2.5                     # ATR multiplier for TP (breakout only)
     poll_every_bars: int = 1              # 1 = check every bar; 4 = check every 4 bars (faster)
 
+    # === Window-cap to keep evaluator O(1) per bar ===
+    # The strategy uses EMA-200 + ATR-100 percentile, both stabilize well within
+    # ~500 bars. Passing the full history per bar makes backtest O(n^2).
+    # We pass only the last N bars to each call.
+    eval_window_15m: int = 500
+    eval_window_1h: int = 300
+    eval_window_4h: int = 200
+
 
 # ============================== RESULT ==============================
 @dataclass
@@ -205,7 +213,18 @@ class BacktestEngine:
         h4_ts = df4h.index.values if df4h is not None else None
 
         n = len(df15)
+        import time as _t
+        t_start = _t.time()
+        report_every = max(1000, n // 20)
         for i in range(self.params.warmup_bars, n):
+            if i % report_every == 0 and i > self.params.warmup_bars:
+                elapsed = _t.time() - t_start
+                pct = (i - self.params.warmup_bars) / (n - self.params.warmup_bars) * 100
+                rate = (i - self.params.warmup_bars) / max(elapsed, 0.001)
+                eta = (n - i) / max(rate, 0.001)
+                print(f"  [progress] bar {i:>7,}/{n:,} ({pct:>5.1f}%) "
+                      f"trades={len(trades):>4} eq=${equity:>9.2f} "
+                      f"rate={rate:>5.0f}b/s ETA={eta:>4.0f}s", flush=True)
             ts = df15.index[i]
             bar = df15.iloc[i]
             bar_high = float(bar["High"])
@@ -273,15 +292,19 @@ class BacktestEngine:
 
             # ===== Look for new entries (only if flat + on poll cadence) =====
             if open_pos is None and (i % self.params.poll_every_bars == 0):
-                # Slice up-to-and-including current bar
-                df15_slice = df15.iloc[:i + 1]
-                # Slice 1h/4h to bars whose ts <= current ts
-                h1_pos = np.searchsorted(h1_ts, ts.to_numpy(), side="right")
-                df1h_slice = df1h.iloc[:h1_pos]
+                # Window-cap each timeframe so strategy is O(1) per call.
+                # EMA-200 + ATR-percentile-100 fully stabilize within these windows.
+                lo15 = max(0, i + 1 - self.params.eval_window_15m)
+                df15_slice = df15.iloc[lo15:i + 1]
+                # 1h/4h: searchsorted finds positions, then we take the most recent N
+                h1_pos = int(np.searchsorted(h1_ts, ts.to_numpy(), side="right"))
+                lo1h = max(0, h1_pos - self.params.eval_window_1h)
+                df1h_slice = df1h.iloc[lo1h:h1_pos]
                 df4h_slice = None
                 if df4h is not None:
-                    h4_pos = np.searchsorted(h4_ts, ts.to_numpy(), side="right")
-                    df4h_slice = df4h.iloc[:h4_pos]
+                    h4_pos = int(np.searchsorted(h4_ts, ts.to_numpy(), side="right"))
+                    lo4h = max(0, h4_pos - self.params.eval_window_4h)
+                    df4h_slice = df4h.iloc[lo4h:h4_pos]
 
                 sig = self._call_strategy(strategy_fn, df15_slice, df1h_slice, df4h_slice,
                                            signal_params, strategy_name)
