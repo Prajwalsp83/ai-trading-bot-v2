@@ -6,9 +6,9 @@ How to deploy code changes to the Windows VPS via git.
 
 Once-only setup (done on first deploy):
 1. Mac side: this git repo exists at `~/Documents/ai-trading-bot/v2/`
-2. VPS side: git installed, repo cloned to `C:\ai-trading-bot\v2\`
-3. VPS `.env` lives at `C:\ai-trading-bot\v2\.env` (gitignored, copied once manually)
-4. NSSM services `psp_bot_breakout` and `psp_bot_smc` point to `C:\ai-trading-bot\v2\scripts\mt5_*.py`
+2. VPS side: git installed, repo cloned to `C:\ai-trading-bot\`
+3. VPS `.env` lives at `C:\ai-trading-bot\.env` (gitignored, copied once manually)
+4. NSSM services `psp_bot_breakout` and `psp_bot_smc` point to `C:\ai-trading-bot\scripts\mt5_*.py`
 
 ## Day-to-day workflow
 
@@ -49,7 +49,7 @@ sc.exe start psp_bot_breakout
 sc.exe start psp_bot_smc
 Start-Sleep 15
 Get-Service psp_bot_*
-Get-Content C:\ai-trading-bot\v2\logs\breakout.out.log -Tail 5
+Get-Content C:\ai-trading-bot\logs\breakout.out.log -Tail 5
 ```
 
 Dashboard changes don't need a restart — just refresh the Streamlit browser tab.

@@ -41,9 +41,11 @@ import MetaTrader5 as mt5
 import pandas as pd
 from dotenv import load_dotenv
 
-HERE = Path(__file__).resolve().parent
+# See comment in mt5_live.py — HERE = project root, SCRIPT_DIR = scripts/
+SCRIPT_DIR = Path(__file__).resolve().parent
+HERE = SCRIPT_DIR.parent
 load_dotenv(HERE / ".env")
-sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(SCRIPT_DIR))
 
 from _bot_common import (  # noqa: E402
     IST, tg_send,

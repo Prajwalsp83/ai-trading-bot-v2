@@ -31,9 +31,13 @@ import requests
 from dotenv import load_dotenv
 
 
-HERE = Path(__file__).resolve().parent
+# HERE = project root. Bot lives at <ROOT>/scripts/mt5_live.py, so parent.parent
+# is the project root. Works for both Mac dev (v2/scripts/...) and VPS
+# (C:\ai-trading-bot\scripts\...). State files, data/, logs/ all sit at root.
+SCRIPT_DIR = Path(__file__).resolve().parent
+HERE = SCRIPT_DIR.parent
 load_dotenv(HERE / ".env")
-sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(SCRIPT_DIR))
 
 # Shared pro-trader infrastructure (sessions, calendar, news, kelly, dd, regime)
 from _bot_common import (  # noqa: E402
