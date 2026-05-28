@@ -52,6 +52,9 @@ from _bot_common import (  # noqa: E402
 from _journal import record_trade as pg_record_trade, record_signal as pg_record_signal  # noqa: E402
 from _journal import snapshot_equity as pg_snapshot_equity, log_event as pg_log_event  # noqa: E402
 
+# ML meta-labeler (shadow mode default — logs decisions, doesn't act on them)
+from _meta_scorer import score_signal_live  # noqa: E402
+
 BOT_NAME = "breakout"
 
 
@@ -845,16 +848,44 @@ def main() -> int:
                             tg_send(f"<b>[BREAKOUT WATCH]</b> {sig['side']} GOLD\n"
                                     f"{sig['reason']}\nPrice: {sig['price']:.2f}  ATR: {sig['atr']:.2f}")
                         elif sev in ("BUY_READY", "SELL_READY"):
+                            # === ML META-LABELER (shadow mode default) ===
+                            # Score the signal. Log decision. In shadow mode,
+                            # bot trades regardless. Once shadow-mode results
+                            # validate the model, set ML_SHADOW_MODE=false in
+                            # .env and ml_result.would_trade will gate trades.
+                            ml_result = score_signal_live(
+                                df15, df1h, sig["side"], BOT_NAME,
+                                rr_target=K_TP / K_SL,
+                            )
+                            log(f"ml: {ml_result.note}  shadow={ml_result.shadow_mode}")
+                            # Log to Postgres signals.extras for analysis
+                            try:
+                                pg_record_signal(
+                                    BOT_NAME, sig,
+                                    regime=regime_snap.regime.value if regime_snap else None,
+                                    extras=ml_result.to_dict(),
+                                )
+                            except Exception:
+                                pass
+
+                            # Gate checks (sessions, calendar, news, cooldown)
                             allowed, why, news = can_open_new_trade(state, sig["side"], gate_cfg)
-                            if allowed:
-                                if why:
-                                    log(f"gate ok: {why}")
-                                open_market(state, sig["side"], sig["atr"], regime_snap)
-                            else:
+                            if not allowed:
                                 log(f"entry blocked: {why}")
                                 tg_send(f"<b>[BLOCKED]</b> {sig['side']} signal blocked: {why}")
                                 ct.setdefault("rejections", {})[why.split(' ')[0]] = (
                                     ct["rejections"].get(why.split(' ')[0], 0) + 1)
+                                continue
+                            # ML veto (only outside shadow mode)
+                            if not ml_result.shadow_mode and not ml_result.would_trade:
+                                log(f"ML veto: {ml_result.note}")
+                                tg_send(f"<b>[ML VETO]</b> {sig['side']} skipped — {ml_result.note}")
+                                ct.setdefault("rejections", {})["ml_veto"] = (
+                                    ct["rejections"].get("ml_veto", 0) + 1)
+                                continue
+                            if why:
+                                log(f"gate ok: {why}")
+                            open_market(state, sig["side"], sig["atr"], regime_snap)
                 else:
                     meta = state["open_meta"]
                     log(f"holding {meta['side']} @ {meta['entry']:.2f}  "
