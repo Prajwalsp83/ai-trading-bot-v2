@@ -64,6 +64,25 @@ class SMCSignalParams:
     max_structure_lookback_bars: int = 300
 
 
+@dataclass
+class MeanReversionParams:
+    """Mean reversion at support/resistance — pairs with SMC for chop regimes."""
+    swing_lookback_bars: int = 100      # H1 swing detection window
+    swing_pivot: int = 2                # fractal sensitivity
+    round_number_step: float = 50.0     # for gold: $50 levels (4400/4450/4500/...)
+    cluster_atr_frac: float = 0.5       # merge levels within 0.5*ATR
+    proximity_atr: float = 0.5          # "at level" means within 0.5*ATR
+    rsi_period: int = 14
+    rsi_oversold: float = 40.0          # AGGRESSIVE — classic is 30
+    rsi_overbought: float = 60.0        # AGGRESSIVE — classic is 70
+    require_candle_confirmation: bool = True
+    adx_max_for_entry: float = 100.0    # 100 = disabled (no ADX filter)
+    sl_buffer_atr: float = 0.5
+    k_tp: float = 1.5                   # fallback TP if no opposite level
+    min_rr: float = 1.0                 # AGGRESSIVE — classic is 1.5+
+    atr_period: int = 14
+
+
 # ============================== INDICATORS ==========================
 def ema(s: pd.Series, period: int) -> pd.Series:
     return s.ewm(span=period, adjust=False).mean()
@@ -455,3 +474,231 @@ def evaluate_smc(df15: pd.DataFrame, df1h: pd.DataFrame,
         "sl_suggested": sl, "tp_suggested": tp,
         "rr": reward / risk, "poi_score": active["score"], "htf_bias": bias,
     }
+
+
+# ============================== MEAN REVERSION ======================
+def rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    """Standard Wilder's RSI."""
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0).ewm(alpha=1 / period, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1 / period, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return (100 - 100 / (1 + rs)).fillna(50)
+
+
+def _mr_swing_levels(df: pd.DataFrame, lookback: int = 100, pivot: int = 2):
+    """Return list of (price, kind) for swing highs/lows in last `lookback` bars."""
+    if len(df) < 2 * pivot + 1:
+        return []
+    win = df.iloc[-lookback:] if len(df) > lookback else df
+    h = win["High"].values
+    l = win["Low"].values
+    out = []
+    for i in range(pivot, len(win) - pivot):
+        wh = h[i - pivot:i + pivot + 1]
+        wl = l[i - pivot:i + pivot + 1]
+        if h[i] == wh.max() and wh.argmax() == pivot:
+            out.append((float(h[i]), "resistance"))
+        if l[i] == wl.min() and wl.argmin() == pivot:
+            out.append((float(l[i]), "support"))
+    return out
+
+
+def _mr_pivot_levels(df_1h: pd.DataFrame):
+    """Classic floor-trader pivot points from PREVIOUS DAY's H1 bars.
+    Returns dict with R1, R2, S1, S2 — used as horizontal S/R."""
+    if len(df_1h) < 24:
+        return {}
+    # Find last completed day (24 1H bars)
+    last_day = df_1h.iloc[-25:-1]    # exclude in-progress bar
+    if len(last_day) < 12:
+        return {}
+    h = float(last_day["High"].max())
+    l = float(last_day["Low"].min())
+    c = float(last_day["Close"].iloc[-1])
+    p = (h + l + c) / 3.0
+    return {
+        "P":  p,
+        "R1": 2 * p - l,
+        "R2": p + (h - l),
+        "S1": 2 * p - h,
+        "S2": p - (h - l),
+    }
+
+
+def _mr_round_levels(price: float, step: float = 50.0, n: int = 3):
+    """Generate n round-number levels above and below price."""
+    base = round(price / step) * step
+    out = []
+    for i in range(-n, n + 1):
+        out.append((base + i * step, "round"))
+    return out
+
+
+def _mr_cluster_levels(levels, cluster_dist: float):
+    """Merge levels within cluster_dist of each other. Counts give 'strength'."""
+    if not levels:
+        return []
+    sorted_lvls = sorted(levels, key=lambda x: x[0])
+    clusters = []
+    current_prices = [sorted_lvls[0][0]]
+    current_kinds = [sorted_lvls[0][1]]
+    for price, kind in sorted_lvls[1:]:
+        if price - current_prices[-1] <= cluster_dist:
+            current_prices.append(price)
+            current_kinds.append(kind)
+        else:
+            clusters.append({"price": sum(current_prices) / len(current_prices),
+                              "strength": len(current_prices),
+                              "sources": list(set(current_kinds))})
+            current_prices = [price]
+            current_kinds = [kind]
+    clusters.append({"price": sum(current_prices) / len(current_prices),
+                      "strength": len(current_prices),
+                      "sources": list(set(current_kinds))})
+    return clusters
+
+
+def evaluate_mean_reversion(df15: pd.DataFrame, df1h: pd.DataFrame,
+                             params: MeanReversionParams) -> dict | None:
+    """Mean reversion at support/resistance.
+
+    Long: price near support + RSI oversold + bullish candle confirmation
+    Short: price near resistance + RSI overbought + bearish candle confirmation
+    """
+    p = params
+    if len(df15) < p.swing_lookback_bars + 5 or len(df1h) < 30:
+        return None
+
+    last = df15.iloc[-1]
+    price = float(last["Close"])
+    last_open = float(last["Open"])
+    last_high = float(last["High"])
+    last_low = float(last["Low"])
+
+    atr_s = atr(df15["High"], df15["Low"], df15["Close"], p.atr_period)
+    atr_val = float(atr_s.iloc[-1])
+    if pd.isna(atr_val) or atr_val <= 0:
+        return None
+
+    # ===== Build levels universe =====
+    # 1) Swings from H1
+    swing_levels = _mr_swing_levels(df1h, lookback=p.swing_lookback_bars, pivot=p.swing_pivot)
+    # 2) Pivot points from previous day
+    pivots = _mr_pivot_levels(df1h)
+    pivot_levels = [(v, "pivot") for k, v in pivots.items() if k != "P"]
+    # 3) Round numbers
+    round_levels = _mr_round_levels(price, step=p.round_number_step, n=3)
+    all_levels = swing_levels + pivot_levels + round_levels
+    if not all_levels:
+        return None
+
+    # Separate into support (below price) and resistance (above price)
+    supports = [(lvl, kind) for lvl, kind in all_levels if lvl < price]
+    resistances = [(lvl, kind) for lvl, kind in all_levels if lvl > price]
+
+    # Cluster nearby levels
+    cluster_dist = p.cluster_atr_frac * atr_val
+    support_clusters = _mr_cluster_levels(supports, cluster_dist)
+    resistance_clusters = _mr_cluster_levels(resistances, cluster_dist)
+
+    # ===== Find nearest cluster to current price =====
+    proximity = p.proximity_atr * atr_val
+    near_support = None
+    near_resistance = None
+    for c in support_clusters:
+        if price - c["price"] <= proximity:
+            if near_support is None or c["price"] > near_support["price"]:
+                near_support = c
+    for c in resistance_clusters:
+        if c["price"] - price <= proximity:
+            if near_resistance is None or c["price"] < near_resistance["price"]:
+                near_resistance = c
+
+    # ===== RSI =====
+    rsi_v = float(rsi(df15["Close"], p.rsi_period).iloc[-1])
+
+    # ===== Candle confirmation =====
+    bullish_candle = (last["Close"] > last_open) and (last_low <= last["Close"])
+    bearish_candle = (last["Close"] < last_open) and (last_high >= last["Close"])
+
+    # ===== BUY at support =====
+    if near_support is not None and rsi_v < p.rsi_oversold:
+        if p.require_candle_confirmation and not bullish_candle:
+            return {"severity": "BREAKOUT_WATCH", "side": "BUY",
+                    "price": price, "atr": atr_val,
+                    "reason": f"at support {near_support['price']:.2f} (strength {near_support['strength']}), "
+                              f"RSI {rsi_v:.0f}, awaiting bullish candle"}
+        sl = near_support["price"] - p.sl_buffer_atr * atr_val
+        # TP: nearest resistance OR k_tp * ATR
+        if resistance_clusters:
+            tp_target = min(resistance_clusters, key=lambda c: c["price"])
+            tp = tp_target["price"]
+        else:
+            tp = price + p.k_tp * atr_val
+        risk = abs(price - sl)
+        reward = abs(tp - price)
+        if risk <= 0 or reward / risk < p.min_rr:
+            return {"severity": "SKIPPED", "side": "BUY", "price": price, "atr": atr_val,
+                    "reason": f"rr_too_low ({reward/max(risk,1e-9):.2f})",
+                    "rejection_reason": "rr_too_low"}
+        return {
+            "severity": "BUY_READY", "side": "BUY", "price": price, "atr": atr_val,
+            "reason": (f"buy bounce off {near_support['price']:.2f} "
+                       f"(strength {near_support['strength']}, sources {','.join(near_support['sources'])}), "
+                       f"RSI {rsi_v:.0f}"),
+            "sl_suggested": sl, "tp_suggested": tp,
+            "rr": reward / risk,
+            "level_strength": near_support["strength"],
+            "rsi": rsi_v,
+        }
+
+    # ===== SELL at resistance =====
+    if near_resistance is not None and rsi_v > p.rsi_overbought:
+        if p.require_candle_confirmation and not bearish_candle:
+            return {"severity": "BREAKOUT_WATCH", "side": "SELL",
+                    "price": price, "atr": atr_val,
+                    "reason": f"at resistance {near_resistance['price']:.2f} (strength {near_resistance['strength']}), "
+                              f"RSI {rsi_v:.0f}, awaiting bearish candle"}
+        sl = near_resistance["price"] + p.sl_buffer_atr * atr_val
+        if support_clusters:
+            tp_target = max(support_clusters, key=lambda c: c["price"])
+            tp = tp_target["price"]
+        else:
+            tp = price - p.k_tp * atr_val
+        risk = abs(price - sl)
+        reward = abs(tp - price)
+        if risk <= 0 or reward / risk < p.min_rr:
+            return {"severity": "SKIPPED", "side": "SELL", "price": price, "atr": atr_val,
+                    "reason": f"rr_too_low ({reward/max(risk,1e-9):.2f})",
+                    "rejection_reason": "rr_too_low"}
+        return {
+            "severity": "SELL_READY", "side": "SELL", "price": price, "atr": atr_val,
+            "reason": (f"sell rejection at {near_resistance['price']:.2f} "
+                       f"(strength {near_resistance['strength']}, sources {','.join(near_resistance['sources'])}), "
+                       f"RSI {rsi_v:.0f}"),
+            "sl_suggested": sl, "tp_suggested": tp,
+            "rr": reward / risk,
+            "level_strength": near_resistance["strength"],
+            "rsi": rsi_v,
+        }
+
+    # ===== No setup: watch nearest level =====
+    nearest = None
+    if support_clusters:
+        nearest = max(support_clusters, key=lambda c: c["price"])
+        side = "BUY"
+        side_str = "support"
+    if resistance_clusters:
+        candidate = min(resistance_clusters, key=lambda c: c["price"])
+        if nearest is None or (candidate["price"] - price) < (price - nearest["price"]):
+            nearest = candidate
+            side = "SELL"
+            side_str = "resistance"
+    if nearest:
+        dist_atr = abs(price - nearest["price"]) / atr_val if atr_val > 0 else 0
+        return {"severity": "WATCHLIST", "side": side,
+                "price": price, "atr": atr_val,
+                "reason": f"nearest {side_str} {nearest['price']:.2f} "
+                          f"({dist_atr:.1f}*ATR away), RSI {rsi_v:.0f}"}
+    return None

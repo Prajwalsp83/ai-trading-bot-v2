@@ -380,9 +380,9 @@ class BacktestEngine:
         return hit_sl, hit_tp
 
     def _call_strategy(self, fn, df15, df1h, df4h, params, strategy_name):
-        """Strategy signature varies — breakout takes df4h, SMC doesn't."""
+        """Strategy signature varies — breakout takes df4h, others take just df15+df1h."""
         try:
-            if strategy_name == "smc":
+            if strategy_name in ("smc", "mean_reversion"):
                 return fn(df15, df1h, params)
             else:
                 return fn(df15, df1h, df4h, params)

@@ -34,8 +34,8 @@ from _backtest_engine import (
     BacktestEngine, SymbolSpecs, CostModel, BacktestParams,
 )
 from _strategies import (
-    evaluate_breakout, evaluate_smc,
-    BreakoutSignalParams, SMCSignalParams,
+    evaluate_breakout, evaluate_smc, evaluate_mean_reversion,
+    BreakoutSignalParams, SMCSignalParams, MeanReversionParams,
 )
 from _config_loader import load_config
 
@@ -75,9 +75,18 @@ def _trim_to_years(df: pd.DataFrame, years: float | None) -> pd.DataFrame:
     return df[df.index >= cutoff]
 
 
-def _params_for(strategy_name: str, bot_cfg) -> BreakoutSignalParams | SMCSignalParams:
+def _params_for(strategy_name: str, bot_cfg):
     """Build signal params for the backtest from the live bot's config.
-    Ensures backtest uses the SAME params the live bot uses."""
+    Ensures backtest uses the SAME params the live bot uses.
+    For 'mean_reversion', returns aggressive defaults (no config wiring yet)."""
+    if strategy_name == "mean_reversion":
+        # Aggressive defaults — phase E experimental, not in config.yaml yet
+        return MeanReversionParams(
+            rsi_oversold=40.0, rsi_overbought=60.0,
+            adx_max_for_entry=100.0,    # disabled
+            proximity_atr=0.5, min_rr=1.0,
+            require_candle_confirmation=True,
+        )
     s = bot_cfg.strategy
     if strategy_name == "breakout":
         return BreakoutSignalParams(
@@ -111,8 +120,8 @@ def _run_one(strategy_name: str, df15, df1h, df4h, specs, args, bot_cfg) -> dict
         starting_equity=args.equity,
         risk_per_trade_pct=args.risk_pct,
         warmup_bars=args.warmup,
-        k_sl=bot_cfg.strategy.k_sl if strategy_name == "breakout" else 1.5,
-        k_tp=bot_cfg.strategy.k_tp if strategy_name == "breakout" else 2.5,
+        k_sl=bot_cfg.strategy.k_sl if (bot_cfg and strategy_name == "breakout") else 1.5,
+        k_tp=bot_cfg.strategy.k_tp if (bot_cfg and strategy_name == "breakout") else 2.5,
         poll_every_bars=args.poll_every,
     )
     cost = CostModel(
@@ -130,13 +139,18 @@ def _run_one(strategy_name: str, df15, df1h, df4h, specs, args, bot_cfg) -> dict
     print(f"  poll: every {params.poll_every_bars} bar(s)")
 
     sig_params = _params_for(strategy_name, bot_cfg)
-    strategy_fn = evaluate_breakout if strategy_name == "breakout" else evaluate_smc
-    if strategy_name == "smc":
-        # SMC engine wrapper doesn't pass df4h
-        pass
+    if strategy_name == "breakout":
+        strategy_fn = evaluate_breakout
+    elif strategy_name == "smc":
+        strategy_fn = evaluate_smc
+    elif strategy_name == "mean_reversion":
+        strategy_fn = evaluate_mean_reversion
+    else:
+        raise ValueError(f"unknown strategy: {strategy_name}")
 
     engine = BacktestEngine(specs, cost=cost, params=params)
     t0 = time.time()
+    # Only breakout needs df4h; others ignore it
     result = engine.run(df15, df1h, df4h if strategy_name == "breakout" else None,
                         strategy_fn, sig_params, strategy_name)
     elapsed = time.time() - t0
@@ -199,7 +213,10 @@ def _run_one(strategy_name: str, df15, df1h, df4h, specs, args, bot_cfg) -> dict
 # ============================== MAIN ================================
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--strategy", choices=["breakout", "smc", "both"], default="both")
+    p.add_argument("--strategy",
+                   choices=["breakout", "smc", "mean_reversion", "both", "all"],
+                   default="both",
+                   help="Strategies to backtest. 'all' = breakout + smc + mean_reversion.")
     p.add_argument("--symbol", default="GOLD.i#")
     p.add_argument("--history-dir", default=str(HERE / "data" / "history"))
     p.add_argument("--years", type=float, default=None,
@@ -229,15 +246,18 @@ def main() -> int:
     df1h = _trim_to_years(df1h, args.years)
     df4h = _trim_to_years(df4h, args.years)
 
-    # Load bot config for strategy params
-    cfg_breakout = load_config("breakout") if args.strategy in ("breakout", "both") else None
-    cfg_smc = load_config("smc") if args.strategy in ("smc", "both") else None
+    # Load bot configs only for strategies that have config sections
+    cfg_breakout = load_config("breakout") if args.strategy in ("breakout", "both", "all") else None
+    cfg_smc = load_config("smc") if args.strategy in ("smc", "both", "all") else None
 
     summaries = []
-    if args.strategy in ("breakout", "both"):
+    if args.strategy in ("breakout", "both", "all"):
         summaries.append(_run_one("breakout", df15, df1h, df4h, specs, args, cfg_breakout))
-    if args.strategy in ("smc", "both"):
+    if args.strategy in ("smc", "both", "all"):
         summaries.append(_run_one("smc", df15, df1h, df4h, specs, args, cfg_smc))
+    if args.strategy in ("mean_reversion", "all"):
+        # MR uses hardcoded aggressive defaults (no config wiring yet)
+        summaries.append(_run_one("mean_reversion", df15, df1h, df4h, specs, args, None))
 
     print("\n\n========== OVERALL ==========")
     for s in summaries:
