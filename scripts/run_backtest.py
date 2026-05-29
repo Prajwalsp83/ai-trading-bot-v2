@@ -80,11 +80,15 @@ def _params_for(strategy_name: str, bot_cfg):
     Ensures backtest uses the SAME params the live bot uses.
     For 'mean_reversion', returns aggressive defaults (no config wiring yet)."""
     if strategy_name == "mean_reversion":
-        # Aggressive defaults — phase E experimental, not in config.yaml yet
+        # === Phase E.2 retest: TIGHTENED textbook MR ===
+        # Previous aggressive run (RSI 40/60, no ADX, RR=1.0) was -70% PnL.
+        # This is the classic textbook config. If still PF<1.0, gold doesn't
+        # have MR edge and we drop the strategy.
         return MeanReversionParams(
-            rsi_oversold=40.0, rsi_overbought=60.0,
-            adx_max_for_entry=100.0,    # disabled
-            proximity_atr=0.5, min_rr=1.0,
+            rsi_oversold=30.0, rsi_overbought=70.0,   # was 40/60
+            adx_max_for_entry=25.0,                    # was disabled (100)
+            proximity_atr=0.3,                         # was 0.5
+            min_rr=1.5,                                # was 1.0
             require_candle_confirmation=True,
         )
     s = bot_cfg.strategy
