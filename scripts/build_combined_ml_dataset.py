@@ -203,6 +203,7 @@ def main() -> int:
                 continue
 
             feats.update({
+                "ts_open": tr["open_time"],     # for chronological walk-forward
                 "strategy": strategy,
                 "side": tr.get("side", "BUY"),
                 "rr_at_entry": float(tr.get("rr", tr.get("r_realised", 0)) if tr.get("rr") else 1.67),
