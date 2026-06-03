@@ -35,7 +35,9 @@ from _backtest_engine import (
 )
 from _strategies import (
     evaluate_breakout, evaluate_smc, evaluate_mean_reversion,
+    evaluate_liquidity_sweep,
     BreakoutSignalParams, SMCSignalParams, MeanReversionParams,
+    LiquiditySweepParams,
 )
 from _config_loader import load_config
 
@@ -80,17 +82,15 @@ def _params_for(strategy_name: str, bot_cfg):
     Ensures backtest uses the SAME params the live bot uses.
     For 'mean_reversion', returns aggressive defaults (no config wiring yet)."""
     if strategy_name == "mean_reversion":
-        # === Phase E.2 retest: TIGHTENED textbook MR ===
-        # Previous aggressive run (RSI 40/60, no ADX, RR=1.0) was -70% PnL.
-        # This is the classic textbook config. If still PF<1.0, gold doesn't
-        # have MR edge and we drop the strategy.
         return MeanReversionParams(
-            rsi_oversold=30.0, rsi_overbought=70.0,   # was 40/60
-            adx_max_for_entry=25.0,                    # was disabled (100)
-            proximity_atr=0.3,                         # was 0.5
-            min_rr=1.5,                                # was 1.0
+            rsi_oversold=30.0, rsi_overbought=70.0,
+            adx_max_for_entry=25.0,
+            proximity_atr=0.3,
+            min_rr=1.5,
             require_candle_confirmation=True,
         )
+    if strategy_name == "liquidity_sweep":
+        return LiquiditySweepParams()    # defaults (see dataclass)
     s = bot_cfg.strategy
     if strategy_name == "breakout":
         return BreakoutSignalParams(
@@ -149,6 +149,8 @@ def _run_one(strategy_name: str, df15, df1h, df4h, specs, args, bot_cfg) -> dict
         strategy_fn = evaluate_smc
     elif strategy_name == "mean_reversion":
         strategy_fn = evaluate_mean_reversion
+    elif strategy_name == "liquidity_sweep":
+        strategy_fn = evaluate_liquidity_sweep
     else:
         raise ValueError(f"unknown strategy: {strategy_name}")
 
@@ -218,9 +220,9 @@ def _run_one(strategy_name: str, df15, df1h, df4h, specs, args, bot_cfg) -> dict
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--strategy",
-                   choices=["breakout", "smc", "mean_reversion", "both", "all"],
+                   choices=["breakout", "smc", "mean_reversion", "liquidity_sweep", "both", "all"],
                    default="both",
-                   help="Strategies to backtest. 'all' = breakout + smc + mean_reversion.")
+                   help="Strategies to backtest. 'all' = breakout + smc + mean_reversion + liquidity_sweep.")
     p.add_argument("--symbol", default="GOLD.i#")
     p.add_argument("--history-dir", default=str(HERE / "data" / "history"))
     p.add_argument("--years", type=float, default=None,
@@ -260,8 +262,11 @@ def main() -> int:
     if args.strategy in ("smc", "both", "all"):
         summaries.append(_run_one("smc", df15, df1h, df4h, specs, args, cfg_smc))
     if args.strategy in ("mean_reversion", "all"):
-        # MR uses hardcoded aggressive defaults (no config wiring yet)
+        # MR uses hardcoded defaults (no config wiring yet)
         summaries.append(_run_one("mean_reversion", df15, df1h, df4h, specs, args, None))
+    if args.strategy in ("liquidity_sweep", "all"):
+        # LS uses hardcoded defaults (no config wiring yet)
+        summaries.append(_run_one("liquidity_sweep", df15, df1h, df4h, specs, args, None))
 
     print("\n\n========== OVERALL ==========")
     for s in summaries:

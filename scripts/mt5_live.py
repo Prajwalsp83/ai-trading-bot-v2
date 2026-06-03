@@ -894,12 +894,18 @@ def main() -> int:
                             ct.setdefault("rejections", {})[r] = ct["rejections"].get(r, 0) + 1
                         elif sev == "WATCHLIST":
                             ct["watches"] = ct.get("watches", 0) + 1
-                            tg_send(f"<b>[WATCH]</b> {sig['side']} GOLD\n"
-                                    f"{sig['reason']}\nPrice: {sig['price']:.2f}  ATR: {sig['atr']:.2f}")
+                            # Telegram WATCH alerts suppressed when breakout is
+                            # disabled (regime weights all 0). Counter still
+                            # increments for the daily summary so we can see
+                            # the strategy is alive. Re-enable by un-commenting
+                            # the tg_send when breakout regime weights go >0.
+                            # tg_send(f"<b>[WATCH]</b> {sig['side']} GOLD\n"
+                            #         f"{sig['reason']}\nPrice: {sig['price']:.2f}  ATR: {sig['atr']:.2f}")
                         elif sev == "BREAKOUT_WATCH":
                             ct["breakouts"] = ct.get("breakouts", 0) + 1
-                            tg_send(f"<b>[BREAKOUT WATCH]</b> {sig['side']} GOLD\n"
-                                    f"{sig['reason']}\nPrice: {sig['price']:.2f}  ATR: {sig['atr']:.2f}")
+                            # Same suppression as WATCHLIST — see comment above.
+                            # tg_send(f"<b>[BREAKOUT WATCH]</b> {sig['side']} GOLD\n"
+                            #         f"{sig['reason']}\nPrice: {sig['price']:.2f}  ATR: {sig['atr']:.2f}")
                         elif sev in ("BUY_READY", "SELL_READY"):
                             # === ML META-LABELER (shadow mode default) ===
                             # Score the signal. Log decision. In shadow mode,

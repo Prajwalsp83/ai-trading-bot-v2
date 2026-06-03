@@ -65,6 +65,27 @@ class SMCSignalParams:
 
 
 @dataclass
+class LiquiditySweepParams:
+    """Liquidity sweep / stop hunt strategy.
+
+    Catches the moment after institutions trigger retail stops then reverse.
+    Complementary to SMC: SMC trades AFTER bias forms; sweep trades the
+    inflection bar itself.
+    """
+    swing_lookback_bars: int = 30        # how far back to find swing levels
+    swing_pivot: int = 2                 # fractal sensitivity
+    min_wick_atr: float = 0.3            # wick must exceed level by this much
+    min_body_frac: float = 0.3           # body / range >= this (no dojis)
+    rsi_oversold_max: float = 50.0       # for long: RSI below this
+    rsi_overbought_min: float = 50.0     # for short: RSI above this
+    rsi_period: int = 14
+    sl_buffer_atr: float = 0.5           # SL beyond wick high/low
+    k_tp: float = 2.0                    # fallback TP multiplier
+    min_rr: float = 1.5
+    atr_period: int = 14
+
+
+@dataclass
 class MeanReversionParams:
     """Mean reversion at support/resistance — pairs with SMC for chop regimes."""
     swing_lookback_bars: int = 100      # H1 swing detection window
@@ -701,4 +722,115 @@ def evaluate_mean_reversion(df15: pd.DataFrame, df1h: pd.DataFrame,
                 "price": price, "atr": atr_val,
                 "reason": f"nearest {side_str} {nearest['price']:.2f} "
                           f"({dist_atr:.1f}*ATR away), RSI {rsi_v:.0f}"}
+    return None
+
+
+# ============================== LIQUIDITY SWEEP =====================
+def evaluate_liquidity_sweep(df15: pd.DataFrame, df1h: pd.DataFrame,
+                              params: LiquiditySweepParams) -> dict | None:
+    """Liquidity sweep / stop-hunt entry.
+
+    Long: current bar wicks below recent swing low, then closes back above with
+          a bullish body. Stop hunt rejected. Enter at next bar.
+    Short: mirror around swing high.
+    """
+    p = params
+    if len(df15) < p.swing_lookback_bars + 5 or len(df1h) < 30:
+        return None
+
+    last = df15.iloc[-1]
+    last_open = float(last["Open"])
+    last_close = float(last["Close"])
+    last_high = float(last["High"])
+    last_low = float(last["Low"])
+    bar_range = last_high - last_low
+
+    if bar_range <= 0:
+        return None
+
+    atr_s = atr(df15["High"], df15["Low"], df15["Close"], p.atr_period)
+    atr_val = float(atr_s.iloc[-1])
+    if pd.isna(atr_val) or atr_val <= 0:
+        return None
+
+    # Recent swing levels from the *prior* N bars (exclude current bar)
+    win = df15.iloc[-(p.swing_lookback_bars + 1):-1]
+    if len(win) < 2 * p.swing_pivot + 1:
+        return None
+    swings = _mr_swing_levels(win, lookback=len(win), pivot=p.swing_pivot)
+    swing_highs = sorted([lvl for lvl, kind in swings if kind == "resistance"])
+    swing_lows = sorted([lvl for lvl, kind in swings if kind == "support"])
+
+    rsi_v = float(rsi(df15["Close"], p.rsi_period).iloc[-1])
+    body = abs(last_close - last_open)
+    body_frac = body / bar_range if bar_range > 0 else 0
+    bullish = last_close > last_open
+    bearish = last_close < last_open
+
+    # ===== LONG SWEEP: bar wicks below a swing low then closes back above =====
+    if swing_lows and bullish and body_frac >= p.min_body_frac and rsi_v <= p.rsi_oversold_max:
+        # find the LOWEST swing that the wick actually swept
+        swept = None
+        for swing_low in swing_lows:
+            if last_low < swing_low - p.min_wick_atr * atr_val and last_close > swing_low:
+                # this swing was swept and reclaimed
+                if swept is None or swing_low < swept:
+                    swept = swing_low
+        if swept is not None:
+            entry = last_close
+            sl = last_low - p.sl_buffer_atr * atr_val
+            # TP: nearest swing high above OR k_tp * ATR
+            higher_swings = [h for h in swing_highs if h > entry]
+            tp = higher_swings[0] if higher_swings else entry + p.k_tp * atr_val
+            risk = abs(entry - sl)
+            reward = abs(tp - entry)
+            if risk <= 0 or reward / risk < p.min_rr:
+                return {"severity": "SKIPPED", "side": "BUY", "price": entry, "atr": atr_val,
+                        "reason": f"rr_too_low ({reward/max(risk,1e-9):.2f})",
+                        "rejection_reason": "rr_too_low"}
+            return {
+                "severity": "BUY_READY", "side": "BUY", "price": entry, "atr": atr_val,
+                "reason": (f"swept liquidity below {swept:.2f} (wick to {last_low:.2f}), "
+                           f"reclaimed with bullish body ({body_frac*100:.0f}%), RSI {rsi_v:.0f}"),
+                "sl_suggested": sl, "tp_suggested": tp,
+                "rr": reward / risk,
+                "rsi": rsi_v,
+                "swept_level": swept,
+            }
+
+    # ===== SHORT SWEEP: bar wicks above a swing high then closes back below =====
+    if swing_highs and bearish and body_frac >= p.min_body_frac and rsi_v >= p.rsi_overbought_min:
+        swept = None
+        for swing_high in swing_highs:
+            if last_high > swing_high + p.min_wick_atr * atr_val and last_close < swing_high:
+                if swept is None or swing_high > swept:
+                    swept = swing_high
+        if swept is not None:
+            entry = last_close
+            sl = last_high + p.sl_buffer_atr * atr_val
+            lower_swings = [l for l in swing_lows if l < entry]
+            tp = lower_swings[-1] if lower_swings else entry - p.k_tp * atr_val
+            risk = abs(entry - sl)
+            reward = abs(tp - entry)
+            if risk <= 0 or reward / risk < p.min_rr:
+                return {"severity": "SKIPPED", "side": "SELL", "price": entry, "atr": atr_val,
+                        "reason": f"rr_too_low ({reward/max(risk,1e-9):.2f})",
+                        "rejection_reason": "rr_too_low"}
+            return {
+                "severity": "SELL_READY", "side": "SELL", "price": entry, "atr": atr_val,
+                "reason": (f"swept liquidity above {swept:.2f} (wick to {last_high:.2f}), "
+                           f"rejected with bearish body ({body_frac*100:.0f}%), RSI {rsi_v:.0f}"),
+                "sl_suggested": sl, "tp_suggested": tp,
+                "rr": reward / risk,
+                "rsi": rsi_v,
+                "swept_level": swept,
+            }
+
+    # ===== WATCHLIST: bias forming but no sweep yet =====
+    if rsi_v <= p.rsi_oversold_max + 5 and swing_lows:
+        return {"severity": "WATCHLIST", "side": "BUY", "price": last_close, "atr": atr_val,
+                "reason": f"oversold-ish (RSI {rsi_v:.0f}), watching for sweep of {min(swing_lows):.2f}"}
+    if rsi_v >= p.rsi_overbought_min - 5 and swing_highs:
+        return {"severity": "WATCHLIST", "side": "SELL", "price": last_close, "atr": atr_val,
+                "reason": f"overbought-ish (RSI {rsi_v:.0f}), watching for sweep of {max(swing_highs):.2f}"}
     return None

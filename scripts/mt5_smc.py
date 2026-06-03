@@ -1024,9 +1024,12 @@ def main() -> int:
                             ct["watches"] = ct.get("watches", 0) + 1
                         elif sev == "BREAKOUT_WATCH":
                             ct["poi_approach"] = ct.get("poi_approach", 0) + 1
-                            tg_send(f"<b>[SMC WATCH]</b> {sig['side']} GOLD\n"
-                                    f"{sig['reason']}\n"
-                                    f"Price: {sig['price']:.2f}  ATR: {sig['atr']:.2f}")
+                            # SMC pre-entry alert — only fire when POI score is high
+                            # to reduce noise. (Was sending every approach.)
+                            if sig.get("poi_score", 0) >= 3:
+                                tg_send(f"<b>[SMC WATCH]</b> {sig['side']} GOLD\n"
+                                        f"{sig['reason']}\n"
+                                        f"Price: {sig['price']:.2f}  ATR: {sig['atr']:.2f}")
                         elif sev in ("BUY_READY", "SELL_READY"):
                             # === ML META-LABELER (shadow mode default) ===
                             ml_result = score_signal_live(
