@@ -26,7 +26,7 @@
 
 **What we've learned that matters more than any code:**
 1. Of 4 strategies backtested over 4.24 years, **only SMC has a real edge**, and even SMC is currently in its worst-ever 262-day drawdown.
-2. The ML meta-labeler on a 1,350-sample combined dataset returned val AUC **0.58** — the previous "0.75" model was overfit on synthetic data. There is no easy ML rescue.
+2. The ML meta-labeler on a 1,350-sample combined dataset returns val AUC **0.5752** (honest; reproduced 2026-06-04). The overfit incumbent scored a higher AUC only because it was overfit. There is no easy ML rescue. NOTE: the model `.pkl` is **gitignored and per-machine** — the VPS and Mac each hold their own file (VPS incumbent was val_auc 0.749; Mac's was 0.391). Changing the model means retraining on the box that runs the bot, not editing a committed file.
 3. Buy-and-hold gold (Sharpe ~1.16) beat 3 of 4 strategies. We considered pivoting to DCA, built it, then user reversed: wants algo trading despite the data.
 
 ---
@@ -68,17 +68,17 @@ v2/
 │   │   ├── GOLD_i_H1.parquet       # 6yr × 1h
 │   │   └── GOLD_i_H4.parquet       # 6yr × 4h
 │   ├── backtests/                  # *_trades.parquet, *_equity.parquet per strategy
-│   ├── ml_dataset_combined.parquet # 1,350 labeled samples across 4 strategies
+│   ├── ml_dataset_combined.parquet # 1,350 labeled samples across 4 strategies (GITIGNORED; built on the VPS, not on the Mac)
 │   ├── economic_calendar.json      # high-impact USD events
 │   ├── .av_news_cache.json         # Alpha Vantage news cache (gitignored)
 │   ├── .dca_state.json             # DCA idempotency state (gitignored)
 │   ├── mt5_trades.csv              # breakout closed-trade journal
 │   ├── mt5_smc_trades.csv          # smc closed-trade journal
 │   └── mt5_dca_trades.csv          # dca buy log (when active)
-├── models/
-│   ├── meta_labeler.pkl            # CURRENT live model (val_auc 0.75 — older, overfit)
-│   ├── meta_labeler.meta.json      # training metadata
-│   └── meta_labeler.prev.*         # backup of prior model
+├── models/                         # ENTIRE DIR IS GITIGNORED — per-machine, NOT shipped via git
+│   ├── meta_labeler.pkl            # live model, set by train_meta_v2.py (honest model = val_auc 0.5752)
+│   ├── meta_labeler.meta.json      # training metadata (features, chosen_threshold, val_auc)
+│   └── meta_labeler.prev.*         # backup of prior model, written on each swap
 └── scripts/
     ├── _config_loader.py           # typed config dataclasses + load_config()
     ├── _bot_common.py              # MT5 init, sessions, calendar, news, regime, Kelly, DD tiers
@@ -180,7 +180,7 @@ All defined in `config.yaml:risk` and enforced in `_bot_common.py`:
 | Liquidity Sweep (4yr) | 241 | -17.4% | 0.88 | -0.51 | — | **Negative edge** |
 | Buy-and-hold gold | n/a | spot move | — | 1.16 | — | **Beat 3 of 4 strategies** |
 
-ML training on combined 1,350-sample dataset: val AUC 0.5752, vs old model 0.7491. Old was overfit; new model NOT auto-swapped because the comparison gate keeps the higher-AUC model. **The live model is still the old overfit one** — be aware of this. Threshold 0.78 on the new model gives 75% WR on only 12 trades over 4 years.
+ML training on combined 1,350-sample dataset: val AUC 0.5752, vs old VPS model 0.7491 (old was overfit). The auto-swap gate keeps the higher-AUC model, so the honest model could never promote — fixed 2026-06-04 with a `--force-replace` flag. On the new model, threshold 0.78 gives 75% WR on only 12 trades over 4yr; the default `--target-wr 0.40` instead picks threshold ~0.05 which keeps 255/270 signals (near no-op). Choose `--target-wr` deliberately. **The bot scores in shadow mode by default (`ML_SHADOW_MODE=true`), so the model logs verdicts but does NOT veto live trades until that env var is flipped to false.**
 
 ---
 
@@ -250,7 +250,12 @@ python scripts/fetch_mt5_history.py
 ```bash
 python scripts/build_combined_ml_dataset.py
 python scripts/train_meta_v2.py
-# add --no-replace to just see the report without swapping the .pkl
+# --no-replace      just report, don't touch the .pkl
+# --force-replace   promote the new model even if its AUC is lower than the incumbent
+#                   (needed to swap an honest lower-AUC model over an overfit one)
+# --target-wr 0.60  raise to pick a higher (more selective) threshold; default 0.40
+#                   picks ~0.05 which barely vetoes anything
+# Run this on the box that runs the bot (the VPS) — the .pkl is gitignored.
 ```
 
 ### Restart everything on VPS
@@ -297,6 +302,8 @@ Password gate via `DASHBOARD_PASSWORD` env var. Cache TTLs tiered: LIVE=30s, SLO
 
 | Date | Phase | Decision |
 |---|---|---|
+| 2026-06-04 | H.10 | Added `--force-replace` to train_meta_v2 to promote the honest meta-labeler (val_auc 0.5752) over the overfit 0.749 incumbent (the AUC gate blocked it). Swap runs on the VPS. Default `--target-wr 0.40` -> threshold ~0.05 (near no-op); tune `--target-wr` for selectivity. Stays shadow mode (no live veto) until `ML_SHADOW_MODE=false`. Documented model `.pkl` is gitignored/per-machine. |
+| 2026-06-04 | H.9 | Fixed latent pickle bug: meta-labeler wrapper was a function-local class (`Can't pickle local object`), surfaced the first time a swap actually ran. Moved to module-level `_meta_scorer.MetaModel` so the bot unpickles it without importing the trainer. |
 | 2026-06-04 | H.8 | Symbol info confirmed GOLD.i# = 100 oz/lot, min 0.01. On $960 account this means 1% target risk is unreachable; actual per-trade risk = 1.5-3%. No micro-gold on this XM account. User emailed XM support to ask about alternatives. Bot continues running with oversized risk in the interim. |
 | 2026-06-03 | H.5 | User override: regime.weights.chop.smc 0.0 → 1.0. Contradicts walk-forward; accepted for activity |
 | 2026-06-03 | H.4 | Built DCA bot (`mt5_dca.py`) + `RUNBOOK_DCA.md`. User reversed before deployment |
@@ -311,7 +318,7 @@ Password gate via `DASHBOARD_PASSWORD` env var. Cache TTLs tiered: LIVE=30s, SLO
 
 ## Known sharp edges
 
-1. **The live ML model is overfit.** `models/meta_labeler.pkl` is the val_auc=0.75 old model trained on a small synthetic dataset. The honest 0.58 model is in the training script's output but was NOT promoted. If you re-run training and pass `--no-replace` it stays this way. If you want the honest model, manually copy it in (and update meta.json) — but expect WAY fewer signals to pass its threshold.
+1. **The model `.pkl` is gitignored and per-machine.** `models/` is NOT in git, so the Mac and VPS each carry their own model file — editing/training on the Mac does NOT change what the live bot loads. Any model swap must run on the VPS. To put the honest val_auc=0.5752 model live, retrain on the VPS with `train_meta_v2.py --force-replace`, which bypasses the AUC-comparison gate that otherwise locks in an overfit higher-AUC incumbent. Two gotchas: (a) the default `--target-wr 0.40` picks threshold ~0.05 which keeps ~255/270 signals — near no-op; raise `--target-wr` for a selective model. (b) Scoring is in shadow mode (`ML_SHADOW_MODE=true`) so the model does not actually veto live trades until that env var is set false in the VPS `.env`.
 
 2. **The contract size makes the 1% risk target unreachable.** GOLD.i# is 100 oz per 1.0 lot, broker min 0.01 lot. At $4,470/oz that's $4,470 of notional per 0.01 lot. With $960 equity and 1% risk target = $9.60, the required SL distance is ~$9.60/(0.01×100) = $9.60 — which is way smaller than any typical 1.5×ATR stop ($15-$75). In practice every SMC trade risks 1.5-3% of equity, not 1%. The bot does not know this — config says 1% and the math layers underneath don't refuse the trade. The safety net (daily 3% cap, 15% max DD) still bites, but per-trade risk is dishonest. Fixes: (a) open XM account tier with smaller gold contract, (b) raise risk_per_trade_pct to 0.02 to be honest, (c) wait until equity > $5K. As of 2026-06-04, user emailed XM support asking which account tier offers micro-gold; waiting on reply.
 
