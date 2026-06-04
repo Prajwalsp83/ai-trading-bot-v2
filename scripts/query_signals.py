@@ -8,7 +8,8 @@ works anywhere the bot runs. Read-only: runs a single SELECT, prints a table.
 Run on the VPS (flat layout):
     python scripts\\query_signals.py
     python scripts\\query_signals.py --bot smc --hours 48 --limit 80
-    python scripts\\query_signals.py --severity ENTRY      # only fired/scored entries
+    python scripts\\query_signals.py --severity BUY_READY  # only confirmed entries (where ML scores)
+    # entry severities are BUY_READY / SELL_READY (NOT "ENTRY"); WATCHLIST/BREAKOUT_WATCH are pre-entry
 """
 from __future__ import annotations
 
