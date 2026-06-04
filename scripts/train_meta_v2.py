@@ -133,9 +133,17 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--no-replace", action="store_true",
                    help="Don't overwrite the live model (just train + report)")
+    p.add_argument("--force-replace", action="store_true",
+                   help="Promote the new model even if its val_auc is lower than "
+                        "the incumbent's. Use to swap in an honest (lower-AUC) "
+                        "model over an overfit one. Ignored if --no-replace is set.")
     p.add_argument("--target-wr", type=float, default=0.40,
                    help="Target win rate for threshold selection")
     args = p.parse_args()
+
+    if args.no_replace and args.force_replace:
+        print("WARNING: both --no-replace and --force-replace given; "
+              "--no-replace wins, model will NOT be swapped.")
 
     if not DATASET.exists():
         print(f"ERROR: {DATASET} not found. Run build_combined_ml_dataset.py first.")
@@ -223,9 +231,15 @@ def main() -> int:
             print(f"  (could not read existing meta: {e})")
     print(f"  New model val_auc: {val_auc:.4f}")
 
-    should_replace = (not args.no_replace) and (
-        existing_auc is None or val_auc > existing_auc
-    )
+    if args.no_replace:
+        should_replace = False
+    elif args.force_replace:
+        should_replace = True
+        if existing_auc is not None and val_auc <= existing_auc:
+            print(f"  --force-replace: promoting despite val_auc {val_auc:.4f} "
+                  f"<= incumbent {existing_auc:.4f}")
+    else:
+        should_replace = existing_auc is None or val_auc > existing_auc
 
     # === Wrapper that the bot uses (must match _meta_scorer interface) ===
     class _Wrapper:
@@ -268,6 +282,7 @@ def main() -> int:
             "val_logloss": float(val_loss),
             "cv_aucs": [float(a) for a in aucs],
             "previous_val_auc": existing_auc,
+            "forced_replace": bool(args.force_replace),
             "target_win_rate": args.target_wr,
             "tp_sl_ratio_assumed": 1.67,
         }
@@ -280,7 +295,8 @@ def main() -> int:
             print(f"\n  --no-replace set; model NOT swapped")
         else:
             print(f"\n  New model AUC {val_auc:.4f} not better than existing {existing_auc:.4f}")
-            print(f"  Model NOT swapped — old one stays live")
+            print(f"  Model NOT swapped -- old one stays live")
+            print(f"  (use --force-replace to promote the lower-AUC model anyway)")
 
     return 0
 
