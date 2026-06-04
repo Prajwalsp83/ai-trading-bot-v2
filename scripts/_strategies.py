@@ -104,6 +104,30 @@ class MeanReversionParams:
     atr_period: int = 14
 
 
+@dataclass
+class FvgScalpParams:
+    """Higher-frequency intraday scalper: M15 fair-value-gap retraces +
+    micro-breakouts in the direction of a fast-EMA bias. Designed for MANY
+    more trades/day than SMC, at the cost of a thinner per-trade edge.
+    Fixed reward:risk via k_tp/k_sl. df1h used only for an optional bias gate.
+    """
+    ema_bias: int = 20                  # M15 EMA defining short-term direction
+    atr_period: int = 14
+    atr_min: float = 0.0                # absolute ATR floor in price units (0 = off)
+    use_fvg: bool = True                # enable FVG-retrace entries
+    use_breakout: bool = True           # enable micro-breakout entries
+    fvg_max_age_bars: int = 12          # only FVGs formed within last N M15 bars (~3h)
+    fvg_min_size_atr: float = 0.15      # gap must be >= this * ATR (skip noise gaps)
+    breakout_lookback: int = 10         # break of prior N-bar high/low
+    breakout_min_body_frac: float = 0.3 # breakout bar body / range must exceed this
+    require_ema_align: bool = True      # only long above EMA / short below
+    require_h1_align: bool = False      # also require 1H EMA bias agreement
+    h1_ema: int = 50
+    k_sl: float = 1.0                   # SL distance = k_sl * ATR (breakout) / structural (fvg)
+    k_tp: float = 1.5                   # reward:risk = k_tp / k_sl
+    sl_buffer_atr: float = 0.1          # extra ATR buffer beyond the SL anchor
+
+
 # ============================== INDICATORS ==========================
 def ema(s: pd.Series, period: int) -> pd.Series:
     return s.ewm(span=period, adjust=False).mean()
@@ -833,4 +857,139 @@ def evaluate_liquidity_sweep(df15: pd.DataFrame, df1h: pd.DataFrame,
     if rsi_v >= p.rsi_overbought_min - 5 and swing_highs:
         return {"severity": "WATCHLIST", "side": "SELL", "price": last_close, "atr": atr_val,
                 "reason": f"overbought-ish (RSI {rsi_v:.0f}), watching for sweep of {max(swing_highs):.2f}"}
+    return None
+
+
+# ============================== FVG SCALP ===========================
+def _fvg_scalp_ready(side: str, entry: float, sl: float, atr_val: float,
+                     setup: str, reason: str, k_sl: float, k_tp: float) -> dict | None:
+    """Build a BUY_READY/SELL_READY signal with a fixed reward:risk = k_tp/k_sl."""
+    risk = abs(entry - sl)
+    if risk <= 0 or atr_val <= 0:
+        return None
+    rr = k_tp / k_sl if k_sl > 0 else 1.5
+    tp = entry + rr * risk if side == "BUY" else entry - rr * risk
+    return {
+        "severity": "BUY_READY" if side == "BUY" else "SELL_READY",
+        "side": side, "price": entry, "atr": atr_val,
+        "reason": reason, "setup": setup,
+        "sl_suggested": sl, "tp_suggested": tp, "rr": rr,
+    }
+
+
+def evaluate_fvg_scalp(df15: pd.DataFrame, df1h: pd.DataFrame,
+                       params: FvgScalpParams) -> dict | None:
+    """Intraday scalper combining FVG retraces and micro-breakouts.
+
+    Long (mirror for short):
+      * bias: close > EMA(ema_bias) on M15 (and optionally 1H EMA bias up)
+      * breakout: current bar closes above the prior `breakout_lookback`-bar
+        high with a solid body -> momentum long
+      * fvg: a fresh bullish FVG (formed within `fvg_max_age_bars`, size
+        >= fvg_min_size_atr*ATR) that the current bar has retraced into while
+        holding above its bottom -> continuation long
+
+    Returns BUY_READY/SELL_READY with structural SL and fixed-RR TP, or None.
+    Intentionally returns None (not WATCHLIST) when idle, to keep the signals
+    table clean given the high evaluation frequency.
+    """
+    p = params
+    need = max(p.ema_bias, p.atr_period, p.breakout_lookback) + 5
+    if len(df15) < need:
+        return None
+
+    close = df15["Close"]
+    high = df15["High"].values
+    low = df15["Low"].values
+    open_ = df15["Open"].values
+    closev = close.values
+
+    ema_b = ema(close, p.ema_bias)
+    atr_s = atr(df15["High"], df15["Low"], df15["Close"], p.atr_period)
+    atr_val = float(atr_s.iloc[-1])
+    if pd.isna(atr_val) or atr_val <= 0:
+        return None
+    if p.atr_min > 0 and atr_val < p.atr_min:
+        return None
+
+    price = float(closev[-1])
+    ema_v = float(ema_b.iloc[-1])
+    if pd.isna(ema_v):
+        return None
+
+    bull_ok = (not p.require_ema_align) or (price > ema_v)
+    bear_ok = (not p.require_ema_align) or (price < ema_v)
+
+    # Optional 1H EMA bias gate
+    if p.require_h1_align and df1h is not None and len(df1h) >= p.h1_ema + 2:
+        ema_h1 = ema(df1h["Close"], p.h1_ema)
+        h1_v = float(ema_h1.iloc[-1])
+        h1_c = float(df1h["Close"].iloc[-1])
+        if not pd.isna(h1_v):
+            bull_ok = bull_ok and (h1_c > h1_v)
+            bear_ok = bear_ok and (h1_c < h1_v)
+
+    last_open = float(open_[-1])
+    last_high = float(high[-1])
+    last_low = float(low[-1])
+    bar_range = last_high - last_low
+    body_frac = abs(price - last_open) / bar_range if bar_range > 0 else 0.0
+    buf = p.sl_buffer_atr * atr_val
+
+    # ===== Micro-breakout (momentum) — checked first =====
+    if p.use_breakout and p.breakout_lookback >= 1 and len(df15) > p.breakout_lookback + 1:
+        win_high = float(np.max(high[-(p.breakout_lookback + 1):-1]))
+        win_low = float(np.min(low[-(p.breakout_lookback + 1):-1]))
+        if (bull_ok and price > win_high and price > last_open
+                and body_frac >= p.breakout_min_body_frac):
+            sl = price - p.k_sl * atr_val - buf
+            sig = _fvg_scalp_ready("BUY", price, sl, atr_val, "breakout",
+                                   f"break of {p.breakout_lookback}-bar high {win_high:.2f}, "
+                                   f"body {body_frac*100:.0f}%", p.k_sl, p.k_tp)
+            if sig:
+                return sig
+        if (bear_ok and price < win_low and price < last_open
+                and body_frac >= p.breakout_min_body_frac):
+            sl = price + p.k_sl * atr_val + buf
+            sig = _fvg_scalp_ready("SELL", price, sl, atr_val, "breakout",
+                                   f"break of {p.breakout_lookback}-bar low {win_low:.2f}, "
+                                   f"body {body_frac*100:.0f}%", p.k_sl, p.k_tp)
+            if sig:
+                return sig
+
+    # ===== FVG retrace (continuation) =====
+    if p.use_fvg:
+        n = len(df15)
+        oldest = max(2, n - p.fvg_max_age_bars)
+        # scan most-recent FVGs first; start at n-2 so the gap formed on a PRIOR
+        # bar and the current bar (n-1) is a genuine retrace into it
+        for k in range(n - 2, oldest - 1, -1):
+            # bullish FVG created at bar k: high[k-2] < low[k]
+            if bull_ok:
+                gap_bot = high[k - 2]
+                gap_top = low[k]
+                if (gap_top - gap_bot) >= p.fvg_min_size_atr * atr_val:
+                    # current bar retraced into the gap and held above its bottom
+                    if last_low <= gap_top and price >= gap_bot:
+                        sl = gap_bot - buf
+                        sig = _fvg_scalp_ready("BUY", price, sl, atr_val, "fvg",
+                                               f"retrace into fresh bull FVG "
+                                               f"[{gap_bot:.2f},{gap_top:.2f}] age={n-1-k}",
+                                               p.k_sl, p.k_tp)
+                        if sig:
+                            return sig
+            # bearish FVG created at bar k: low[k-2] > high[k]
+            if bear_ok:
+                gap_top = low[k - 2]
+                gap_bot = high[k]
+                if (gap_top - gap_bot) >= p.fvg_min_size_atr * atr_val:
+                    if last_high >= gap_bot and price <= gap_top:
+                        sl = gap_top + buf
+                        sig = _fvg_scalp_ready("SELL", price, sl, atr_val, "fvg",
+                                               f"retrace into fresh bear FVG "
+                                               f"[{gap_bot:.2f},{gap_top:.2f}] age={n-1-k}",
+                                               p.k_sl, p.k_tp)
+                        if sig:
+                            return sig
+
     return None

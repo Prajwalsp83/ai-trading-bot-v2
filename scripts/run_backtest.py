@@ -35,7 +35,7 @@ from _backtest_engine import (
 )
 from _strategies import (
     evaluate_breakout, evaluate_smc, evaluate_mean_reversion,
-    evaluate_liquidity_sweep,
+    evaluate_liquidity_sweep, evaluate_fvg_scalp, FvgScalpParams,
     BreakoutSignalParams, SMCSignalParams, MeanReversionParams,
     LiquiditySweepParams,
 )
@@ -91,6 +91,8 @@ def _params_for(strategy_name: str, bot_cfg):
         )
     if strategy_name == "liquidity_sweep":
         return LiquiditySweepParams()    # defaults (see dataclass)
+    if strategy_name == "fvg_scalp":
+        return FvgScalpParams()          # defaults (see dataclass)
     s = bot_cfg.strategy
     if strategy_name == "breakout":
         return BreakoutSignalParams(
@@ -151,6 +153,8 @@ def _run_one(strategy_name: str, df15, df1h, df4h, specs, args, bot_cfg) -> dict
         strategy_fn = evaluate_mean_reversion
     elif strategy_name == "liquidity_sweep":
         strategy_fn = evaluate_liquidity_sweep
+    elif strategy_name == "fvg_scalp":
+        strategy_fn = evaluate_fvg_scalp
     else:
         raise ValueError(f"unknown strategy: {strategy_name}")
 
@@ -220,7 +224,7 @@ def _run_one(strategy_name: str, df15, df1h, df4h, specs, args, bot_cfg) -> dict
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--strategy",
-                   choices=["breakout", "smc", "mean_reversion", "liquidity_sweep", "both", "all"],
+                   choices=["breakout", "smc", "mean_reversion", "liquidity_sweep", "fvg_scalp", "both", "all"],
                    default="both",
                    help="Strategies to backtest. 'all' = breakout + smc + mean_reversion + liquidity_sweep.")
     p.add_argument("--symbol", default="GOLD.i#")
@@ -267,6 +271,9 @@ def main() -> int:
     if args.strategy in ("liquidity_sweep", "all"):
         # LS uses hardcoded defaults (no config wiring yet)
         summaries.append(_run_one("liquidity_sweep", df15, df1h, df4h, specs, args, None))
+    if args.strategy in ("fvg_scalp", "all"):
+        # FVG scalper uses hardcoded defaults (no config wiring yet)
+        summaries.append(_run_one("fvg_scalp", df15, df1h, df4h, specs, args, None))
 
     print("\n\n========== OVERALL ==========")
     for s in summaries:
