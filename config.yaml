@@ -111,12 +111,14 @@ news:
 #    Code still runs, but every trade gets halted by risk layer (regime=0).
 #    Kept active to log signals for future research / ML training.
 #
-# 2. SMC WEIGHTS FLIPPED — walk-forward exposed that SMC's edge comes from
-#    catching trending moves to next swing high/low. It LOSES in chop.
-#    Previous config assumed SMC = mean reversion (wrong). New config:
-#       trends -> SMC full size (1.0)
-#       chop   -> SMC halted (0.0)
-#       transition / high_vol / unknown -> partial size, safer
+# 2. SMC WEIGHTS — walk-forward originally said: trends great, chop bad.
+#
+# Phase H.5 override (2026-06-03, user request "make SMC trade in chop too"):
+#   chop -> SMC 1.0  (was 0.0). This CONTRADICTS the walk-forward finding
+#   that SMC loses in chop. Accepted tradeoff: more trades at cost of
+#   higher expected drawdown. Risk net (daily_loss_cap 3%, max_dd 15%,
+#   DD tiers, cooldown after 2 losses) is the safety layer. If the
+#   account starts dropping, the bot self-throttles.
 regime:
   enabled: true
   adx_period: 14
@@ -126,9 +128,9 @@ regime:
   weights:
     trend_up:   { breakout: 0.0, smc: 1.0 }   # smc thrives in uptrends
     trend_down: { breakout: 0.0, smc: 1.0 }   # smc thrives in downtrends
-    chop:       { breakout: 0.0, smc: 0.0 }   # smc chops out; nothing trades
-    transition: { breakout: 0.0, smc: 0.5 }   # partial — wait for clarity
-    high_vol:   { breakout: 0.0, smc: 0.5 }   # partial — manage risk
+    chop:       { breakout: 0.0, smc: 1.0 }   # H.5 override — user wants chop trades
+    transition: { breakout: 0.0, smc: 0.5 }   # partial — wait for clarity (unchanged)
+    high_vol:   { breakout: 0.0, smc: 0.5 }   # keep partial — vol risk is real
     unknown:    { breakout: 0.0, smc: 0.0 }   # don't trade what we don't classify
 
 # =============================================================================
@@ -155,11 +157,53 @@ strategies:
     k_sl: 1.5                          # overrides global stops.k_sl if present
     k_tp: 2.5
 
+  # ----- DCA (Dollar-Cost-Averaging) gold buyer (mt5_dca.py) -----
+  # Phase H pivot (2026-06-02): after 4 strategies failed to beat buy-and-hold
+  # (Sharpe 1.16) and ML couldn't separate signal from noise (AUC 0.58 on
+  # 1,350-sample combined dataset), pivoted to dollar-cost averaging.
+  # Mathematically optimal for someone with a long-term gold thesis and no
+  # demonstrated short-term edge. Set it and forget it.
+  #
+  # Strategy: Every Monday at London open (12:30 IST), buy a fixed USD amount
+  # of gold at market. NO stop loss. NO take profit. Pure accumulation.
+  # Risk = capped position size, NOT per-trade risk.
+  dca:
+    enabled: true                      # master kill-switch for DCA bot
+    magic: 20260603                    # new magic — keep separate from SMC positions
+
+    # === Schedule ===
+    schedule_cron_ist: "30 12 * * 1"   # 12:30 IST every Monday (London open)
+                                        # day-of-week 1 = Monday (Sun=0)
+    fire_window_minutes: 30            # tolerance: fire any time in next 30m if missed
+                                        # protects against bot restart / network blip
+
+    # === Sizing ===
+    buy_amount_usd: 50.0               # nominal USD per buy
+    min_lot: 0.01                      # broker minimum (XM Ultra Low)
+    max_lot_per_buy: 0.05              # hard cap — refuse if math says > this
+    lot_step: 0.01                     # round DOWN to this granularity
+
+    # === Position caps (safety) ===
+    max_total_lots: 1.0                # refuse new buys once cumulative >= this
+                                        # at $50/wk, 0.01 lot/wk -> 100 weeks to fill (~2yr)
+    max_buys_per_day: 1                # defense against scheduler glitch
+
+    # === Exit logic ===
+    sell_mode: "never"                 # never | profit_take_pct | trailing_pct | rebalance
+                                        # 'never' = pure HODL, manual close only
+
+    # === Reporting ===
+    send_buy_telegram: true            # alert on every accumulation
+    send_skip_telegram: false          # don't spam on session/cap skips
+    journal_csv: ./data/mt5_dca_trades.csv
+
   # ----- SMC (Smart Money Concepts) bot (mt5_smc.py) -----
   # Phase C update (2026-05-29): switched to 'aggressive_all' params from
   # the parameter sweep. Backtest on 4.24 years showed PF 1.89, Sharpe 0.89,
   # 185 trades, max DD 13.57% — survived 2022 sell-off. CAVEAT: recent 12
-  # months (2025-Mar onwards) showed -7R cumulative. Monitor closely.
+  # months (2025-Mar onwards) showed -7R cumulative.
+  # Phase H pivot (2026-06-02): SMC DISABLED in favor of DCA. Service should
+  # be stopped on VPS — see RUNBOOK.md. Code preserved for possible re-enable.
   smc:
     magic: 20260601
     htf_pivot: 1                       # more sensitive swing detection (was 2)

@@ -158,6 +158,25 @@ class SMCParams:
 
 
 @dataclass
+class DCAParams:
+    """Phase H — DCA gold buyer params."""
+    enabled: bool
+    magic: int
+    schedule_cron_ist: str        # 5-field cron, IST tz
+    fire_window_minutes: int
+    buy_amount_usd: float
+    min_lot: float
+    max_lot_per_buy: float
+    lot_step: float
+    max_total_lots: float
+    max_buys_per_day: int
+    sell_mode: str                # 'never' for now
+    send_buy_telegram: bool
+    send_skip_telegram: bool
+    journal_csv: str
+
+
+@dataclass
 class MLConfig:
     enabled: bool
     shadow_mode: bool
@@ -191,7 +210,7 @@ class DBCredentials:
 @dataclass
 class BotConfig:
     """Top-level config consumed by each bot. `strategy` is one of the per-bot params."""
-    strategy_name: Literal["breakout", "smc"]
+    strategy_name: Literal["breakout", "smc", "dca"]
     mt5: MT5Config
     mt5_creds: MT5Credentials
     telegram: TelegramConfig
@@ -204,7 +223,7 @@ class BotConfig:
     regime: RegimeConfig
     ml: MLConfig
     reporting: ReportingConfig
-    strategy: BreakoutParams | SMCParams
+    strategy: BreakoutParams | SMCParams | DCAParams
     journal_csv: str
 
     def print_summary(self) -> None:
@@ -233,12 +252,18 @@ class BotConfig:
                 print(f"[config] breakout: ema={s.ema_fast}/{s.ema_slow} atr={s.atr_period} "
                       f"atr_min={s.atr_min} atr_pct_min={s.atr_pct_min} "
                       f"4h_gate={s.use_4h_trend_gate} k_sl={s.k_sl} k_tp={s.k_tp}", flush=True)
-            else:
+            elif isinstance(self.strategy, SMCParams):
                 s = self.strategy
                 print(f"[config] smc: pivot=h{s.htf_pivot}/l{s.ltf_pivot} "
                       f"poi_min={s.min_poi_score} fresh={s.poi_freshness_bars}b "
                       f"sl_buf={s.sl_buffer_atr_frac}xatr require_choch={s.require_ltf_choch} "
                       f"min_rr={s.min_rr}", flush=True)
+            elif isinstance(self.strategy, DCAParams):
+                s = self.strategy
+                print(f"[config] dca: enabled={s.enabled} cron_ist='{s.schedule_cron_ist}' "
+                      f"window={s.fire_window_minutes}m amount=${s.buy_amount_usd:.0f} "
+                      f"lot_step={s.lot_step} cap_lot/buy={s.max_lot_per_buy} "
+                      f"cap_total={s.max_total_lots} sell={s.sell_mode}", flush=True)
         except Exception as e:
             # NEVER crash the bot because of a logging issue
             print(f"[config] print_summary failed: {type(e).__name__}: {e}", flush=True)
@@ -270,7 +295,7 @@ def _load_env() -> dict:
     return {}
 
 
-def load_config(strategy_name: Literal["breakout", "smc"]) -> BotConfig:
+def load_config(strategy_name: Literal["breakout", "smc", "dca"]) -> BotConfig:
     """Load config.yaml + .env. Strategy-specific params returned based on strategy_name."""
     if not CONFIG_PATH.exists():
         raise ConfigError(f"config.yaml not found at {CONFIG_PATH}")
@@ -423,6 +448,25 @@ def load_config(strategy_name: Literal["breakout", "smc"]) -> BotConfig:
             max_structure_lookback_bars=int(sp_raw.get("max_structure_lookback_bars", 300)),
         )
         journal_csv = str(journals_raw.get("smc", "./data/mt5_smc_trades.csv"))
+    elif strategy_name == "dca":
+        dp_raw = _get(raw, "strategies.dca", {}, required=True)
+        strategy = DCAParams(
+            enabled=bool(dp_raw.get("enabled", True)),
+            magic=int(dp_raw["magic"]),
+            schedule_cron_ist=str(dp_raw.get("schedule_cron_ist", "30 12 * * 1")),
+            fire_window_minutes=int(dp_raw.get("fire_window_minutes", 30)),
+            buy_amount_usd=float(dp_raw.get("buy_amount_usd", 50.0)),
+            min_lot=float(dp_raw.get("min_lot", 0.01)),
+            max_lot_per_buy=float(dp_raw.get("max_lot_per_buy", 0.05)),
+            lot_step=float(dp_raw.get("lot_step", 0.01)),
+            max_total_lots=float(dp_raw.get("max_total_lots", 1.0)),
+            max_buys_per_day=int(dp_raw.get("max_buys_per_day", 1)),
+            sell_mode=str(dp_raw.get("sell_mode", "never")),
+            send_buy_telegram=bool(dp_raw.get("send_buy_telegram", True)),
+            send_skip_telegram=bool(dp_raw.get("send_skip_telegram", False)),
+            journal_csv=str(dp_raw.get("journal_csv", "./data/mt5_dca_trades.csv")),
+        )
+        journal_csv = strategy.journal_csv
     else:
         raise ConfigError(f"unknown strategy_name: {strategy_name}")
 
@@ -471,6 +515,21 @@ def _validate(cfg: BotConfig) -> None:
         errs.append("dd_tiers is empty — risk system needs at least one tier")
     if cfg.strategy.magic <= 0:
         errs.append(f"strategy.magic={cfg.strategy.magic} invalid")
+    if isinstance(cfg.strategy, DCAParams):
+        s = cfg.strategy
+        if s.buy_amount_usd <= 0:
+            errs.append(f"dca.buy_amount_usd={s.buy_amount_usd} must be > 0")
+        if s.lot_step <= 0 or s.min_lot <= 0:
+            errs.append("dca.lot_step and dca.min_lot must be > 0")
+        if s.max_lot_per_buy < s.min_lot:
+            errs.append(f"dca.max_lot_per_buy({s.max_lot_per_buy}) < min_lot({s.min_lot})")
+        if s.max_total_lots <= 0:
+            errs.append(f"dca.max_total_lots={s.max_total_lots} must be > 0")
+        if s.sell_mode not in {"never", "profit_take_pct", "trailing_pct", "rebalance"}:
+            errs.append(f"dca.sell_mode={s.sell_mode!r} unknown")
+        # cron validation: 5 fields
+        if len(s.schedule_cron_ist.split()) != 5:
+            errs.append(f"dca.schedule_cron_ist must have 5 fields, got {s.schedule_cron_ist!r}")
     if errs:
         raise ConfigError("config validation failed:\n  - " + "\n  - ".join(errs))
 
