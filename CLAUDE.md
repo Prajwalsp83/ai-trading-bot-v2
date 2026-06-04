@@ -1,11 +1,14 @@
 # CLAUDE.md — AI Trading Bot Project Context
 
 **Owner:** Praj (DevOps + full-stack founder, solo operator)
-**Project root:** `~/Documents/ai-trading-bot/`
-**Active dev tree:** `v2/` (the `v1` `bot.py` at repo root is legacy — don't touch it)
-**Live infra:** Windows VPS at `163.223.86.49`, NSSM-managed Python services
+**Mac project root:** `~/Documents/ai-trading-bot/` (with active dev tree in `v2/`)
+**Mac git repo:** `~/Documents/ai-trading-bot/v2/` — this is where `.git` lives. The `v1` `bot.py` at the parent is legacy, untracked, don't touch.
+**VPS repo:** `C:\ai-trading-bot\` — FLAT layout, NO `v2\` subdir. The GitHub repo is rooted at what the Mac calls `v2/`, so on the VPS `scripts/`, `config.yaml`, `data/` etc. are directly at the repo root.
+**VPS host:** `163.223.86.49`
+**VPS NSSM binary:** `C:\ai-trading-bot\nssm.exe` (in the repo dir itself — not on PATH; always invoke as `.\nssm.exe`)
+**VPS service logs:** `C:\ai-trading-bot\logs\` — files named `smc.out.log`, `smc.err.log`, `breakout.out.log`, etc.
 **Broker:** XM Ultra Low (MT5 demo, account 168184358)
-**Instrument:** XAUUSD via symbol `GOLD.i#`
+**Instrument:** XAUUSD via symbol `GOLD.i#` (contract 100 oz/lot, 0.01 min, 0.01 step — KNOWN ISSUE, see "Sharp edges" below)
 
 > This document is the handoff from a prior Claude session that built most of this system. It's hand-written, not auto-generated — read it once at session start so you don't repeat decisions we already made and threw away.
 
@@ -207,19 +210,26 @@ There's a stale-bars guard in the bots: if `df15.iloc[-1]['Close']` diverges fro
 
 ### Edit a parameter and ship it
 ```bash
-# Mac
+# Mac (note: Mac has no `python` alias, use `python3`)
 cd ~/Documents/ai-trading-bot/v2
 # edit config.yaml
-python scripts/_config_loader.py smc    # verify it parses
+python3 scripts/_config_loader.py smc    # verify it parses (needs venv with pyyaml)
 git add config.yaml
 git commit -m "tweak: <one-liner>"
 git push origin main
-# RDP to VPS
-cd C:\bots\ai-trading-bot\v2
-git pull
-nssm restart psp_bot_smc
-Get-Content logs\smc_stdout.log -Wait -Tail 40
 ```
+
+```powershell
+# RDP to VPS (163.223.86.49). Repo lives at C:\ai-trading-bot\ (flat — NO v2 subdir).
+cd C:\ai-trading-bot
+git pull
+.\nssm.exe restart psp_bot_smc       # nssm.exe is in the repo dir, NOT on PATH
+Start-Sleep -Seconds 5
+.\nssm.exe status psp_bot_smc        # should report SERVICE_RUNNING
+Get-Content .\logs\smc.out.log -Wait -Tail 40   # log naming is <bot>.out.log / .err.log
+```
+
+Restart gotcha: if `nssm restart` reports `Unexpected status SERVICE_STOP_PENDING`, the stop took too long and the service might have stayed stopped. Always run `.\nssm.exe status` after restart and explicitly `.\nssm.exe start` if it's `SERVICE_STOPPED`.
 
 ### Run a backtest locally
 ```bash
@@ -245,14 +255,17 @@ python scripts/train_meta_v2.py
 
 ### Restart everything on VPS
 ```powershell
-nssm restart psp_bot_smc
-nssm restart psp_bot_breakout
-nssm restart psp_dashboard
+cd C:\ai-trading-bot
+.\nssm.exe restart psp_bot_smc
+.\nssm.exe restart psp_bot_breakout
+.\nssm.exe restart psp_dashboard
 ```
 
 ### Tail logs
 ```powershell
-Get-Content C:\bots\ai-trading-bot\v2\logs\smc_stdout.log -Wait -Tail 40
+Get-Content C:\ai-trading-bot\logs\smc.out.log -Wait -Tail 40
+Get-Content C:\ai-trading-bot\logs\smc.err.log -Wait -Tail 40    # errors only
+Get-Content C:\ai-trading-bot\logs\breakout.out.log -Wait -Tail 40
 ```
 
 ---
@@ -284,6 +297,7 @@ Password gate via `DASHBOARD_PASSWORD` env var. Cache TTLs tiered: LIVE=30s, SLO
 
 | Date | Phase | Decision |
 |---|---|---|
+| 2026-06-04 | H.8 | Symbol info confirmed GOLD.i# = 100 oz/lot, min 0.01. On $960 account this means 1% target risk is unreachable; actual per-trade risk = 1.5-3%. No micro-gold on this XM account. User emailed XM support to ask about alternatives. Bot continues running with oversized risk in the interim. |
 | 2026-06-03 | H.5 | User override: regime.weights.chop.smc 0.0 → 1.0. Contradicts walk-forward; accepted for activity |
 | 2026-06-03 | H.4 | Built DCA bot (`mt5_dca.py`) + `RUNBOOK_DCA.md`. User reversed before deployment |
 | 2026-06-02 | G | ML retrain on 1,350 samples → val AUC 0.58. Old 0.75 model kept (NOT swapped) |
@@ -299,7 +313,7 @@ Password gate via `DASHBOARD_PASSWORD` env var. Cache TTLs tiered: LIVE=30s, SLO
 
 1. **The live ML model is overfit.** `models/meta_labeler.pkl` is the val_auc=0.75 old model trained on a small synthetic dataset. The honest 0.58 model is in the training script's output but was NOT promoted. If you re-run training and pass `--no-replace` it stays this way. If you want the honest model, manually copy it in (and update meta.json) — but expect WAY fewer signals to pass its threshold.
 
-2. **The user has $988 account equity.** 1% risk = $9.88 per trade. Combined with $14 typical SL = lot size sometimes rounds to broker minimum 0.01. Below ~$2,000 equity, you can't meaningfully reduce risk_per_trade_pct.
+2. **The contract size makes the 1% risk target unreachable.** GOLD.i# is 100 oz per 1.0 lot, broker min 0.01 lot. At $4,470/oz that's $4,470 of notional per 0.01 lot. With $960 equity and 1% risk target = $9.60, the required SL distance is ~$9.60/(0.01×100) = $9.60 — which is way smaller than any typical 1.5×ATR stop ($15-$75). In practice every SMC trade risks 1.5-3% of equity, not 1%. The bot does not know this — config says 1% and the math layers underneath don't refuse the trade. The safety net (daily 3% cap, 15% max DD) still bites, but per-trade risk is dishonest. Fixes: (a) open XM account tier with smaller gold contract, (b) raise risk_per_trade_pct to 0.02 to be honest, (c) wait until equity > $5K. As of 2026-06-04, user emailed XM support asking which account tier offers micro-gold; waiting on reply.
 
 3. **SMC is in a 262-day drawdown** as of last walk-forward analysis. The decision to keep running it is a bet that the regime returns to its historical mean. If the user starts asking why the account is bleeding, the answer is in `walk_forward.py` output.
 
@@ -317,7 +331,7 @@ Password gate via `DASHBOARD_PASSWORD` env var. Cache TTLs tiered: LIVE=30s, SLO
 
 This question has come up multiple times. Run through this checklist:
 
-1. Is `psp_bot_smc` running? `nssm status psp_bot_smc`
+1. Is `psp_bot_smc` running? `cd C:\ai-trading-bot && .\nssm.exe status psp_bot_smc`
 2. Is the current time in a trading session? London 12:30-16:30 IST, NY overlap 18:00-21:00, NY afternoon 21:00-23:30.
 3. Is the news/calendar gate blocking? Tail the log for `calendar_block` or `news_contra`.
 4. What's the current regime? Look for `[regime]` log lines.
@@ -361,9 +375,9 @@ Ranked roughly by value:
 
 Order of operations:
 1. Check VPS is up: ping `163.223.86.49`.
-2. RDP in, `nssm status psp_bot_smc` — if it's "SERVICE_PAUSED" or "STOPPED", `nssm start psp_bot_smc`.
-3. Tail `logs\smc_stdout.log` for the last error.
-4. If MT5 is the issue: `nssm restart psp_bot_smc` triggers a full reconnect (init_mt5_headless with creds from .env).
+2. RDP in, `cd C:\ai-trading-bot` then `.\nssm.exe status psp_bot_smc` — if it's "SERVICE_PAUSED" or "STOPPED", `.\nssm.exe start psp_bot_smc`.
+3. Tail `C:\ai-trading-bot\logs\smc.out.log` (stdout) and `smc.err.log` (errors) for the last error.
+4. If MT5 is the issue: `.\nssm.exe restart psp_bot_smc` triggers a full reconnect (`init_mt5_headless` with creds from `.env`). Watch for the `SERVICE_STOP_PENDING` warning — if you see it, manually `.\nssm.exe start psp_bot_smc` to be safe.
 5. If Postgres is the issue: the bot keeps trading; `_journal.py` no-ops on failure.
 6. If you can't get it back in <15min: stop the service. Don't let a degraded bot trade.
 
