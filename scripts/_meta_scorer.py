@@ -34,6 +34,33 @@ META_PATH = HERE / "models" / "meta_labeler.meta.json"
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+CAT_COLS = ["strategy", "side", "session", "regime"]
+
+
+# ============================== MODEL WRAPPER =======================
+class MetaModel:
+    """Picklable wrapper around the sklearn estimator + ordinal encoder.
+
+    Defined at module level here (NOT inside the training script) so the bot
+    can unpickle it via the module it already imports, without importing the
+    training code. predict() returns P(WIN) for each row.
+    """
+    def __init__(self, model, encoder, feature_names):
+        self.model = model
+        self.encoder = encoder
+        self.feature_names = feature_names
+
+    def _enc(self, X):
+        if self.encoder is None:
+            return X
+        X = X.copy()
+        cat = [c for c in CAT_COLS if c in X.columns]
+        X[cat] = self.encoder.transform(X[cat].astype(str))
+        return X
+
+    def predict(self, X):
+        return self.model.predict_proba(self._enc(X))[:, 1]
+
 
 # ============================== STATE ===============================
 _MODEL = None        # lazy loaded

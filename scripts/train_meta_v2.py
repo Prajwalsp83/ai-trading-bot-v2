@@ -25,6 +25,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _meta_scorer import MetaModel
+
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.preprocessing import OrdinalEncoder
 from sklearn.metrics import roc_auc_score, log_loss, confusion_matrix
@@ -241,22 +244,9 @@ def main() -> int:
     else:
         should_replace = existing_auc is None or val_auc > existing_auc
 
-    # === Wrapper that the bot uses (must match _meta_scorer interface) ===
-    class _Wrapper:
-        def __init__(self, model, encoder, feature_names):
-            self.model = model
-            self.encoder = encoder
-            self.feature_names = feature_names
-        def _enc(self, X):
-            if self.encoder is None: return X
-            X = X.copy()
-            cat = [c for c in CAT_COLS if c in X.columns]
-            X[cat] = self.encoder.transform(X[cat].astype(str))
-            return X
-        def predict(self, X):
-            return self.model.predict_proba(self._enc(X))[:, 1]
-
-    wrapper = _Wrapper(model, enc, list(X.columns))
+    # Wrapper class lives in _meta_scorer so the bot can unpickle it without
+    # importing this training script.
+    wrapper = MetaModel(model, enc, list(X.columns))
 
     if should_replace:
         # Backup old
