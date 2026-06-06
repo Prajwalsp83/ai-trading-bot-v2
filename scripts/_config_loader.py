@@ -295,7 +295,7 @@ def _load_env() -> dict:
     return {}
 
 
-def load_config(strategy_name: Literal["breakout", "smc", "dca"]) -> BotConfig:
+def load_config(strategy_name: Literal["breakout", "smc", "dca", "fvg_scalp"]) -> BotConfig:
     """Load config.yaml + .env. Strategy-specific params returned based on strategy_name."""
     if not CONFIG_PATH.exists():
         raise ConfigError(f"config.yaml not found at {CONFIG_PATH}")
@@ -306,9 +306,13 @@ def load_config(strategy_name: Literal["breakout", "smc", "dca"]) -> BotConfig:
     _load_env()    # ensures os.getenv works for secrets
 
     # === MT5 ===
+    # Per-bot poll override (mt5.poll_seconds_overrides.<strategy>) falls back
+    # to the global mt5.poll_seconds.
+    _global_poll = int(_get(raw, "mt5.poll_seconds", 60))
+    _poll = int(_get(raw, f"mt5.poll_seconds_overrides.{strategy_name}", _global_poll))
     mt5 = MT5Config(
         symbol=_get(raw, "mt5.symbol", "GOLD.i#"),
-        poll_seconds=int(_get(raw, "mt5.poll_seconds", 60)),
+        poll_seconds=_poll,
     )
     mt5_creds = MT5Credentials(
         path=os.getenv("MT5_PATH"),

@@ -12,7 +12,14 @@
 # Credentials read from env: MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
 mt5:
   symbol: "GOLD.i#"           # XM Ultra Low gold ticker
-  poll_seconds: 60            # how often each bot polls MT5
+  poll_seconds: 60            # default: how often each bot polls MT5
+  # Per-bot overrides (by strategy name). Falls back to poll_seconds above.
+  # Bar-based bots (smc) only act on a new M15 bar, so a faster poll just
+  # detects bars sooner + heartbeats more; it does NOT add trades or flood
+  # the signals table. The scalper re-evaluates intrabar, so it wants a tight
+  # poll to catch micro-breakouts/FVG retraces promptly.
+  poll_seconds_overrides:
+    fvg_scalp: 10
 
 # ----- Telegram alerts -----
 telegram:
