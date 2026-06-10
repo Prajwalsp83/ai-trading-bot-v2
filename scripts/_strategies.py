@@ -94,13 +94,13 @@ class MeanReversionParams:
     cluster_atr_frac: float = 0.5       # merge levels within 0.5*ATR
     proximity_atr: float = 0.5          # "at level" means within 0.5*ATR
     rsi_period: int = 14
-    rsi_oversold: float = 40.0          # AGGRESSIVE — classic is 30
-    rsi_overbought: float = 60.0        # AGGRESSIVE — classic is 70
+    rsi_oversold: float = 35.0          # conservative default; sweep may loosen
+    rsi_overbought: float = 65.0        # conservative default; sweep may loosen
     require_candle_confirmation: bool = True
     adx_max_for_entry: float = 100.0    # 100 = disabled (no ADX filter)
     sl_buffer_atr: float = 0.5
     k_tp: float = 1.5                   # fallback TP if no opposite level
-    min_rr: float = 1.0                 # AGGRESSIVE — classic is 1.5+
+    min_rr: float = 1.5                 # conservative default; sweep may loosen
     atr_period: int = 14
 
 
@@ -550,13 +550,25 @@ def _mr_swing_levels(df: pd.DataFrame, lookback: int = 100, pivot: int = 2):
 
 
 def _mr_pivot_levels(df_1h: pd.DataFrame):
-    """Classic floor-trader pivot points from PREVIOUS DAY's H1 bars.
-    Returns dict with R1, R2, S1, S2 — used as horizontal S/R."""
+    """Classic floor-trader pivot points from the PREVIOUS calendar day's H1
+    bars. Returns dict with R1, R2, S1, S2 — used as horizontal S/R.
+
+    Grouped by actual server-time calendar date rather than a fixed 24-bar
+    window: gold doesn't trade a clean 24 bars/day (weekend + session gaps), so
+    "last 24 bars" usually straddles two days and yields wrong pivots. We take
+    the most recent FULLY COMPLETED calendar day (the last date strictly before
+    the current/forming day) and use its true H/L/C.
+    """
     if len(df_1h) < 24:
         return {}
-    # Find last completed day (24 1H bars)
-    last_day = df_1h.iloc[-25:-1]    # exclude in-progress bar
-    if len(last_day) < 12:
+    dates = df_1h.index.normalize()          # tz-aware midnight per bar
+    current_day = dates[-1]                   # day of the most recent bar
+    prev_mask = dates < current_day           # only fully-prior days
+    if not prev_mask.any():
+        return {}
+    prev_day = dates[prev_mask].max()
+    last_day = df_1h[dates == prev_day]
+    if len(last_day) < 4:                      # too few bars to be a real day
         return {}
     h = float(last_day["High"].max())
     l = float(last_day["Low"].min())
@@ -964,13 +976,20 @@ def evaluate_fvg_scalp(df15: pd.DataFrame, df1h: pd.DataFrame,
         # scan most-recent FVGs first; start at n-2 so the gap formed on a PRIOR
         # bar and the current bar (n-1) is a genuine retrace into it
         for k in range(n - 2, oldest - 1, -1):
+            # Bars strictly between the gap bar and the current (retrace) bar.
+            # If one of them already traded fully through the gap, the gap is
+            # mitigated/filled -- a stale level we must not re-enter.
+            inner_low = low[k + 1:n - 1]
+            inner_high = high[k + 1:n - 1]
             # bullish FVG created at bar k: high[k-2] < low[k]
             if bull_ok:
                 gap_bot = high[k - 2]
                 gap_top = low[k]
                 if (gap_top - gap_bot) >= p.fvg_min_size_atr * atr_val:
+                    # mitigated if any intervening bar traded down through gap_bot
+                    mitigated = inner_low.size > 0 and float(inner_low.min()) <= gap_bot
                     # current bar retraced into the gap and held above its bottom
-                    if last_low <= gap_top and price >= gap_bot:
+                    if not mitigated and last_low <= gap_top and price >= gap_bot:
                         sl = gap_bot - buf
                         sig = _fvg_scalp_ready("BUY", price, sl, atr_val, "fvg",
                                                f"retrace into fresh bull FVG "
@@ -983,7 +1002,9 @@ def evaluate_fvg_scalp(df15: pd.DataFrame, df1h: pd.DataFrame,
                 gap_top = low[k - 2]
                 gap_bot = high[k]
                 if (gap_top - gap_bot) >= p.fvg_min_size_atr * atr_val:
-                    if last_high >= gap_bot and price <= gap_top:
+                    # mitigated if any intervening bar traded up through gap_top
+                    mitigated = inner_high.size > 0 and float(inner_high.max()) >= gap_top
+                    if not mitigated and last_high >= gap_bot and price <= gap_top:
                         sl = gap_top + buf
                         sig = _fvg_scalp_ready("SELL", price, sl, atr_val, "fvg",
                                                f"retrace into fresh bear FVG "
