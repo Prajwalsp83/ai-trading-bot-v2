@@ -107,8 +107,10 @@ def main() -> int:
     if tick is None:
         print("FAIL: no tick"); mt5.shutdown(); return 1
 
-    # ATR(14) from last 100 bars of M15
-    rates = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M15, 0, 100)
+    # ATR(14) from last 100 COMPLETED bars of M15. start_pos=1 drops bar 0
+    # (the forming candle, which repaints) so ATR matches the closed-bar ATR
+    # the live bot and backtest use.
+    rates = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M15, 1, 100)
     if rates is None or len(rates) < ATR_PERIOD + 5:
         print("FAIL: not enough bars"); mt5.shutdown(); return 1
     atr_val = compute_atr(rates)

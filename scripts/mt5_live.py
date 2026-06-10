@@ -322,9 +322,14 @@ def _rates_to_df(rates) -> pd.DataFrame:
 def fetch_bars():
     """Returns (df15, df1h, df4h) DataFrames pulled from MT5."""
     try:
-        r15 = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M15, 0, 500)
-        r1h = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_H1, 0, 500)
-        r4h = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_H4, 0, 500)
+        # start_pos=1 drops bar 0 (the in-progress candle, which repaints
+        # until it closes). The backtest only ever sees completed bars, so
+        # the live bot must too -- otherwise it evaluates a forming bar that
+        # can reverse before close (look-ahead bias vs the backtest). The
+        # last_bar_ts dedupe still yields exactly one evaluation per closed bar.
+        r15 = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M15, 1, 500)
+        r1h = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_H1, 1, 500)
+        r4h = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_H4, 1, 500)
         return _rates_to_df(r15), _rates_to_df(r1h), _rates_to_df(r4h)
     except Exception as e:
         log(f"data fetch error: {e}")

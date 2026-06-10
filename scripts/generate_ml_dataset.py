@@ -546,8 +546,11 @@ def fetch_bars_mt5(symbol: str, months: int) -> tuple[pd.DataFrame, pd.DataFrame
     n_1h  = months * 30 * bars_per_day_1h
 
     print(f"Fetching {symbol} bars from MT5 (months={months}: {n_15m} 15m + {n_1h} 1h)...")
-    r15 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, n_15m)
-    r1h = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, n_1h)
+    # start_pos=1 drops the in-progress (forming) bar so features/ATR are
+    # computed only from completed bars -- matches what the live bot and the
+    # backtest see, avoiding look-ahead in the training labels.
+    r15 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 1, n_15m)
+    r1h = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 1, n_1h)
     mt5.shutdown()
 
     if r15 is None or len(r15) == 0:
