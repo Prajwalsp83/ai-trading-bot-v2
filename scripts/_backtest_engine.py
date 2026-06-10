@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import random
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -48,6 +48,10 @@ class SymbolSpecs:
     digits: int
     avg_spread_points: int        # snapshot spread in points (1 point = 1 * point)
     commission_per_lot_rt_usd: float
+    # Overnight swap in USD per 1.0 lot per night (already unit-converted from
+    # MT5 swap_mode by fetch_mt5_history). Negative = cost. 0.0 = unknown/none.
+    swap_long_usd_per_lot_night: float = 0.0
+    swap_short_usd_per_lot_night: float = 0.0
 
     @classmethod
     def from_json(cls, path: Path | str) -> "SymbolSpecs":
@@ -62,6 +66,8 @@ class SymbolSpecs:
             digits=int(d["digits"]),
             avg_spread_points=int(d.get("current_spread_points", 25)),
             commission_per_lot_rt_usd=float(d.get("assumed_commission_per_lot_rt_usd", 7.0)),
+            swap_long_usd_per_lot_night=float(d.get("swap_long_usd_per_lot_night", 0.0)),
+            swap_short_usd_per_lot_night=float(d.get("swap_short_usd_per_lot_night", 0.0)),
         )
 
 
@@ -73,6 +79,12 @@ class CostModel:
     slippage_stop_pips_max: float = 3.0
     commission_per_lot_rt_usd: float = 7.0
     pessimistic_intrabar: bool = True    # if SL+TP same bar, count SL (conservative)
+    # Overnight swap, USD per 1.0 lot per night (negative = cost). Left 0.0 by
+    # default; the engine fills these from SymbolSpecs when available so old
+    # backtests without real swap rates are unchanged.
+    swap_long_usd_per_lot_night: float = 0.0
+    swap_short_usd_per_lot_night: float = 0.0
+    triple_swap_weekday: int = 4         # weekday charged 3x (Mon=0..Sun=6); 4=Fri for XM metals
 
 
 @dataclass
@@ -166,6 +178,11 @@ class BacktestEngine:
         # Use snapshot spread if not overridden in CostModel
         if self.cost.spread_points == 25 and specs.avg_spread_points != 25:
             self.cost.spread_points = specs.avg_spread_points
+        # Inherit real swap rates from the symbol specs unless explicitly set.
+        if self.cost.swap_long_usd_per_lot_night == 0.0:
+            self.cost.swap_long_usd_per_lot_night = specs.swap_long_usd_per_lot_night
+        if self.cost.swap_short_usd_per_lot_night == 0.0:
+            self.cost.swap_short_usd_per_lot_night = specs.swap_short_usd_per_lot_night
         self.params = params or BacktestParams()
         self.rng = random.Random(seed)
 
@@ -180,6 +197,33 @@ class BacktestEngine:
     def _commission(self, lots: float) -> float:
         """Per-side commission. Round-trip = 2 * this."""
         return lots * self.cost.commission_per_lot_rt_usd / 2.0
+
+    def _swap_usd(self, side: str, lots: float, open_time, close_time) -> float:
+        """Overnight swap cost in USD for a position held open_time -> close_time.
+
+        Counts each daily rollover (calendar date boundary) crossed while the
+        position is open. Market is closed Sat/Sun so those rollovers are not
+        charged; the triple_swap_weekday rollover is charged as 3 nights to
+        account for the weekend carry. Returns nights * per_night_rate * lots
+        (rate is negative for a cost, so this normally reduces P&L). Intraday
+        trades (no date boundary crossed) return 0.
+        """
+        rate = (self.cost.swap_long_usd_per_lot_night if side == "BUY"
+                else self.cost.swap_short_usd_per_lot_night)
+        if rate == 0.0 or lots <= 0:
+            return 0.0
+        # Normalize to plain dates (handles datetime and pandas Timestamp).
+        start = open_time.date() if hasattr(open_time, "date") else open_time
+        end = close_time.date() if hasattr(close_time, "date") else close_time
+        nights = 0
+        cur = start
+        while cur < end:
+            cur = cur + timedelta(days=1)   # the date we roll INTO
+            wd = cur.weekday()              # Mon=0 .. Sun=6
+            if wd == 5 or wd == 6:          # Sat/Sun: market closed, no swap
+                continue
+            nights += 3 if wd == self.cost.triple_swap_weekday else 1
+        return nights * rate * lots
 
     def _round_lot(self, lots: float) -> float:
         step = self.specs.volume_step
@@ -260,11 +304,20 @@ class BacktestEngine:
                     exit_reason = "TP"
 
                 if exit_price is not None:
+                    # SELL closes by BUYING back at the ask. Chart OHLC (and thus
+                    # the SL/TP levels) are bid prices, so a short's real exit
+                    # fill is bid + spread. Add the full spread to the short's
+                    # exit before P&L. BUY exits sell at bid = chart, unchanged.
+                    if open_pos["side"] == "SELL":
+                        exit_price += self._spread_price()
                     # Compute P&L
                     direction = 1 if open_pos["side"] == "BUY" else -1
                     pnl_price = (exit_price - open_pos["entry"]) * direction
+                    swap_usd = self._swap_usd(open_pos["side"], open_pos["lots"],
+                                              open_pos["open_time"], ts)
                     pnl_usd = (pnl_price * open_pos["lots"] * self.specs.contract_size
-                                - 2 * self._commission(open_pos["lots"]))
+                                - 2 * self._commission(open_pos["lots"])
+                                + swap_usd)
                     stop_dist = abs(open_pos["entry"] - open_pos["sl"])
                     r_realised = (pnl_usd / (stop_dist * open_pos["lots"] * self.specs.contract_size)
                                     if stop_dist > 0 else 0.0)
@@ -281,6 +334,7 @@ class BacktestEngine:
                         "tp": open_pos["tp"],
                         "lots": open_pos["lots"],
                         "pnl_usd": pnl_usd,
+                        "swap_usd": swap_usd,
                         "r_realised": r_realised,
                         "duration_min": duration,
                         "exit_reason": exit_reason,
@@ -362,7 +416,7 @@ class BacktestEngine:
         # Build result
         trades_df = pd.DataFrame(trades) if trades else pd.DataFrame(
             columns=["trade_id","side","open_time","close_time","entry","exit","sl","tp",
-                     "lots","pnl_usd","r_realised","duration_min","exit_reason",
+                     "lots","pnl_usd","swap_usd","r_realised","duration_min","exit_reason",
                      "atr_at_entry","risk_pct_used"])
         equity_df = pd.DataFrame(equity_rows)
         return BacktestResult(trades=trades_df, equity=equity_df,

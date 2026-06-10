@@ -126,6 +126,27 @@ def fetch_specs(mt5, symbol: str) -> dict:
     tick = mt5.symbol_info_tick(symbol)
     if sym is None or tick is None:
         raise RuntimeError("symbol_info or tick is None")
+
+    # Convert MT5 raw swap (swap_long/swap_short) to USD per 1.0 lot per night.
+    # The unit depends on swap_mode (SYMBOL_SWAP_MODE):
+    #   1 = POINTS            -> swap_points * point * contract_size (USD, since
+    #                            XAUUSD profit currency is USD on a USD account)
+    #   2..6 = currency/%-of  -> already a money amount per lot, use as-is
+    #   0 = DISABLED / other  -> no swap
+    # If the profit currency is not USD this needs an FX conversion we don't do
+    # here; for GOLD.i# on this XM USD account the assumption holds.
+    swap_mode = int(getattr(sym, "swap_mode", 0))
+    point = float(sym.point)
+    contract = float(sym.trade_contract_size)
+
+    def _swap_to_usd_per_lot_night(raw: float) -> float:
+        raw = float(raw)
+        if swap_mode == 1:                       # POINTS
+            return raw * point * contract
+        if swap_mode in (2, 3, 4, 5, 6):         # money / interest per lot
+            return raw
+        return 0.0                               # disabled / unknown
+
     return {
         "symbol": symbol,
         "snapshot_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -141,8 +162,11 @@ def fetch_specs(mt5, symbol: str) -> dict:
         "current_spread_points": int(round((tick.ask - tick.bid) / sym.point)),
         "stops_level_points": int(sym.trade_stops_level),
         "freeze_level_points": int(sym.trade_freeze_level),
-        "swap_long": float(sym.swap_long),
+        "swap_mode": swap_mode,
+        "swap_long": float(sym.swap_long),       # raw MT5 value (unit per swap_mode)
         "swap_short": float(sym.swap_short),
+        "swap_long_usd_per_lot_night": _swap_to_usd_per_lot_night(sym.swap_long),
+        "swap_short_usd_per_lot_night": _swap_to_usd_per_lot_night(sym.swap_short),
         # Commission usually NOT in symbol_info — broker-specific. Hardcode our XM
         # Ultra Low gold commission. Update if your account differs.
         "assumed_commission_per_lot_rt_usd": 7.0,
