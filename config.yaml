@@ -120,12 +120,12 @@ news:
 #
 # 2. SMC WEIGHTS — walk-forward originally said: trends great, chop bad.
 #
-# Phase H.5 override (2026-06-03, user request "make SMC trade in chop too"):
-#   chop -> SMC 1.0  (was 0.0). This CONTRADICTS the walk-forward finding
-#   that SMC loses in chop. Accepted tradeoff: more trades at cost of
-#   higher expected drawdown. Risk net (daily_loss_cap 3%, max_dd 15%,
-#   DD tiers, cooldown after 2 losses) is the safety layer. If the
-#   account starts dropping, the bot self-throttles.
+# Phase H.5 override (2026-06-03) set chop -> SMC 1.0 against the walk-forward
+# finding that SMC loses in chop. REVERTED 2026-06-11 (code review): chop -> SMC
+# 0.0 restored, the data-supported value. Do not re-enable chop trading until
+# the new out-of-sample walk-forward (scripts/walk_forward_oos.py, Phase 3)
+# proves SMC has a positive OOS edge in chop. At most 0.25 (half-quarter size)
+# if partial evidence appears; full 1.0 needs OOS proof.
 regime:
   enabled: true
   adx_period: 14
@@ -135,7 +135,7 @@ regime:
   weights:
     trend_up:   { breakout: 0.0, smc: 1.0 }   # smc thrives in uptrends
     trend_down: { breakout: 0.0, smc: 1.0 }   # smc thrives in downtrends
-    chop:       { breakout: 0.0, smc: 1.0 }   # H.5 override — user wants chop trades
+    chop:       { breakout: 0.0, smc: 0.0 }   # reverted (code review): SMC loses in chop per walk-forward; needs OOS proof to re-enable
     transition: { breakout: 0.0, smc: 0.5 }   # partial — wait for clarity (unchanged)
     high_vol:   { breakout: 0.0, smc: 0.5 }   # keep partial — vol risk is real
     unknown:    { breakout: 0.0, smc: 0.0 }   # don't trade what we don't classify
