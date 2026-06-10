@@ -195,6 +195,9 @@ def _run_one(strategy_name: str, df15, df1h, df4h, specs, args, bot_cfg) -> dict
             "slip_stop_max": cost.slippage_stop_pips_max,
             "commission_per_lot_rt_usd": cost.commission_per_lot_rt_usd,
             "pessimistic_intrabar": cost.pessimistic_intrabar,
+            "swap_long_usd_per_lot_night": cost.swap_long_usd_per_lot_night,
+            "swap_short_usd_per_lot_night": cost.swap_short_usd_per_lot_night,
+            "triple_swap_weekday": cost.triple_swap_weekday,
         },
         "signal_params": asdict(sig_params),
         "data": {
