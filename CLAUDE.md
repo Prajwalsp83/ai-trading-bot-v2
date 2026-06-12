@@ -172,8 +172,10 @@ All defined in `config.yaml:risk` and enforced in `_bot_common.py`:
 
 | Strategy | Trades | PnL | PF | Sharpe | Max DD | Verdict |
 |---|---|---|---|---|---|---|
-| Breakout (4.24yr) | 322 | +5.5% | 1.04 | low | — | **Dead** (walk-forward 2/9) |
+| Breakout (4.24yr) | 322 | +5.5% | 1.04 | low | — | **Dead** (walk-forward 2/9; 2026-06-11 re-run w/ harsher costs: PF 1.08 — still dead) |
 | SMC `aggressive_all` (4.24yr) | 185 | +381% | 1.89 | 0.89 | 13.57% | **Live** (best edge; in 262-day DD) |
+| SMC **OOS walk-forward** (2026-06-11, 12mo train/6mo test) | — | +71.9R | **1.98 OOS** | — | 11.8R | **DEPLOYABLE** — honest out-of-sample, 5/7 windows positive, WR 30%. The number that justifies keeping SMC live. |
+| FVG scalp (2026-06-11, M15 intraday) | 875 | **-99.7%** | 0.71 | — | 99.7% | **Rejected pre-deployment** — 37% WR at fixed 1.5RR dies on costs; ~0.9 trades/day, not the 5-8 targeted |
 | SMC baseline (4.24yr) | 31 | +23.8% | — | — | — | Too few trades |
 | Mean Reversion aggressive | 419 | -70.16% | 0.58 | — | 76.94% | **Catastrophic** |
 | Mean Reversion textbook | not retested | — | — | — | — | Code exists, untested |
@@ -302,6 +304,7 @@ Password gate via `DASHBOARD_PASSWORD` env var. Cache TTLs tiered: LIVE=30s, SLO
 
 | Date | Phase | Decision |
 |---|---|---|
+| 2026-06-11 | I.1 | Full re-validation after review fixes (completed-bar fetch, SELL-exit spread, swap modeling, chop revert). SMC OOS walk-forward: **PF 1.98, +71.9R, 5/7 windows -> DEPLOYABLE**, stays live. fvg_scalp PF 0.71/-99.7% -> rejected pre-deployment. breakout/MR/LS still negative. Report: `data/backtests/review_fixes_report.md`. Swap on this XM demo is DISABLED (swap_mode=0) so $0/night is correct; re-check on real account. Gotchas: cp1252 crash applies to *redirected* stdout too (Start-Process logs) — suite forces PYTHONIOENCODING=utf-8 for child steps; urllib hits CERTIFICATE_VERIFY_FAILED on the VPS, requests (certifi) works — use requests for Telegram. |
 | 2026-06-04 | H.10 | Added `--force-replace` to train_meta_v2 to promote the honest meta-labeler (val_auc 0.5752) over the overfit 0.749 incumbent (the AUC gate blocked it). Swap runs on the VPS. Default `--target-wr 0.40` -> threshold ~0.05 (near no-op); tune `--target-wr` for selectivity. Stays shadow mode (no live veto) until `ML_SHADOW_MODE=false`. Documented model `.pkl` is gitignored/per-machine. |
 | 2026-06-04 | H.9 | Fixed latent pickle bug: meta-labeler wrapper was a function-local class (`Can't pickle local object`), surfaced the first time a swap actually ran. Moved to module-level `_meta_scorer.MetaModel` so the bot unpickles it without importing the trainer. |
 | 2026-06-04 | H.8 | Symbol info confirmed GOLD.i# = 100 oz/lot, min 0.01. On $960 account this means 1% target risk is unreachable; actual per-trade risk = 1.5-3%. No micro-gold on this XM account. User emailed XM support to ask about alternatives. Bot continues running with oversized risk in the interim. |
