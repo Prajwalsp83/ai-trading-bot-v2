@@ -219,7 +219,7 @@ def main() -> int:
             print(f"Fetching {tf}...")
             df = fetch_history(mt5, args.symbol, tf, args.years)
             if df.empty:
-                print(f"  [{tf}] NO DATA — skipping save")
+                print(f"  [{tf}] NO DATA -- skipping save")
                 continue
             out_path = out_dir / f"{_sanitize(args.symbol)}_{tf}.parquet"
             df.to_parquet(out_path)

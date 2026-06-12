@@ -137,9 +137,10 @@ def _run_one(strategy_name: str, df15, df1h, df4h, specs, args, bot_cfg) -> dict
         commission_per_lot_rt_usd=args.commission or specs.commission_per_lot_rt_usd,
         pessimistic_intrabar=True,
     )
+    # ASCII only -- this print crashes under cp1252 when stdout is redirected
     print(f"  costs: spread={cost.spread_points}pts, "
-          f"slip_entry≤{cost.slippage_entry_pips_max}pips, "
-          f"slip_stop≤{cost.slippage_stop_pips_max}pips, "
+          f"slip_entry<={cost.slippage_entry_pips_max}pips, "
+          f"slip_stop<={cost.slippage_stop_pips_max}pips, "
           f"commission=${cost.commission_per_lot_rt_usd}/lot RT")
     print(f"  risk: {params.risk_per_trade_pct*100:.2f}%/trade, start=${params.starting_equity:,.0f}")
     print(f"  poll: every {params.poll_every_bars} bar(s)")

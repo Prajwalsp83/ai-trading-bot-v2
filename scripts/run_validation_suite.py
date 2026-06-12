@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import subprocess
 import sys
 import time
@@ -68,12 +69,22 @@ def tg_send(text: str) -> None:
     if not token or not chat_id:
         print("[notify] telegram creds missing in .env; skipping notify")
         return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    # Prefer requests: it ships its own CA bundle (certifi), which is what the
+    # live bots use successfully on the VPS. Plain urllib hit
+    # CERTIFICATE_VERIFY_FAILED there (system trust store issue).
     try:
-        data = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{token}/sendMessage", data=data)
-        urllib.request.urlopen(req, timeout=15)
-        print("[notify] telegram message sent")
+        import requests
+        requests.post(url, data=payload, timeout=15).raise_for_status()
+        print("[notify] telegram message sent (requests)")
+        return
+    except Exception as e:
+        print(f"[notify] requests path failed ({e}); trying urllib")
+    try:
+        data = urllib.parse.urlencode(payload).encode()
+        urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=15)
+        print("[notify] telegram message sent (urllib)")
     except Exception as e:
         print(f"[notify] telegram send failed (non-fatal): {e}")
 
@@ -135,9 +146,13 @@ def main() -> int:
         print(f"\n--- step: {name} ---", flush=True)
         t = time.time()
         try:
+            # PYTHONIOENCODING=utf-8: when stdout is redirected to a file on
+            # Windows, Python defaults to cp1252 and any non-ASCII char in a
+            # child's print crashes it (this killed the fvg_scalp step once).
+            env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
             rc = subprocess.run(
                 [sys.executable, str(SCRIPTS / argv[0])] + argv[1:],
-                cwd=HERE).returncode
+                cwd=HERE, env=env).returncode
         except Exception as e:
             print(f"step crashed: {e}", flush=True)
             rc = -1
