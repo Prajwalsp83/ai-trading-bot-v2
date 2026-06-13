@@ -350,6 +350,8 @@ def maybe_dd_alert(bot: Bot, st: dict) -> None:
 # ============================== main ================================
 def main() -> int:
     import os
+    from _config_loader import _load_env
+    _load_env()   # load .env into os.environ before reading secrets (same as the bots)
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
