@@ -1,0 +1,12 @@
+# Minimal deps to import the test-reachable modules and run pytest.
+# Deliberately excludes heavy/platform-specific runtime deps (streamlit,
+# yfinance, upstox-python-sdk, scikit-learn) and MetaTrader5 (Windows-only,
+# lazy-imported) -- none are needed by the current test suite, and skipping
+# them keeps CI to ~30s instead of minutes.
+pandas
+numpy
+pyyaml
+python-dateutil
+requests
+python-dotenv     # mt5_smc/mt5_live import it at module load (completed-bar test)
+pytest
