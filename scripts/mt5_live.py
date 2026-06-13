@@ -46,6 +46,7 @@ from _bot_common import (  # noqa: E402
     classify_regime, RegimeParams,
     compute_effective_risk, KellyParams, DEFAULT_DD_TIERS,
     init_mt5_headless, check_mt5_alive_or_reconnect, reset_mt5_failure_counter,
+    control_paused,
 )
 
 # Postgres journal (degrades gracefully if DATABASE_URL not set / DB unreachable)
@@ -372,6 +373,11 @@ def can_open_new_trade(state: dict, side: str | None = None, gate_cfg: GateConfi
       6. Directional news gate (sentiment vs trade direction)
     """
     now = _now_utc()
+
+    # === 0. REMOTE PAUSE (Telegram /pause) -- blocks NEW entries only ===
+    paused, pause_why = control_paused()
+    if paused:
+        return False, pause_why, None
 
     # === 1. MAX DRAWDOWN KILL-SWITCH (HARD) ===
     # Equity has fallen >= MAX_DD_PCT below peak. Bot refuses new trades.

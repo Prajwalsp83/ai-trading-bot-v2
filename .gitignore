@@ -12,6 +12,8 @@
 .paper_state.json
 .mt5_state.json
 .mt5_smc_state.json
+data/.control.json
+data/.telegram_control_state.json
 
 # =============================================================================
 # Trade journals + caches (live data, not source)

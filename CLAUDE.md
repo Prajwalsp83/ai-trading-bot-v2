@@ -23,6 +23,7 @@
 
 **What's built but NOT running:**
 - `psp_bot_dca` — DCA gold buyer (mt5_dca.py). Fully plumbed (config, loader, runbook). User pivoted away from DCA after building it — service is NOT installed. See `v2/RUNBOOK_DCA.md` if it gets revived.
+- `psp_bot_telegram` — Telegram control center (`scripts/telegram_control.py`, built 2026-06-13). Phone control: `/status /pnl /positions /pause /resume /risk /logs /restart` + daily summary + DD alerts. `/pause` writes `data/.control.json`, which both bots check at the top of `can_open_new_trade()` (blocks NEW entries only; open positions keep SL/TP). Install via `DEPLOY_TELEGRAM.md` (NSSM service, not yet registered on the VPS). Auth = `TELEGRAM_CHAT_ID` only. Reuses existing telegram .env creds.
 
 **What we've learned that matters more than any code:**
 1. Of 4 strategies backtested over 4.24 years, **only SMC has a real edge**, and even SMC is currently in its worst-ever 262-day drawdown.
@@ -304,6 +305,7 @@ Password gate via `DASHBOARD_PASSWORD` env var. Cache TTLs tiered: LIVE=30s, SLO
 
 | Date | Phase | Decision |
 |---|---|---|
+| 2026-06-13 | I.2 | Built Telegram control center (`scripts/telegram_control.py`, service `psp_bot_telegram`). Phone commands + daily summary + DD alerts. Added `control_paused/control_set/CONTROL_PATH` to `_bot_common.py`; both bots now check the remote-pause flag first in `can_open_new_trade()`. Pause = block NEW entries only (open positions keep server-side SL/TP). Auth strictly by `TELEGRAM_CHAT_ID`. Single getUpdates poller (don't run a 2nd on the same token -> 409). Deploy: `DEPLOY_TELEGRAM.md`. Tests: `tests/test_control_flag.py` (flag round-trip, fail-open, PnL bucketing). NOT yet registered as an NSSM service on the VPS. |
 | 2026-06-11 | I.1 | Full re-validation after review fixes (completed-bar fetch, SELL-exit spread, swap modeling, chop revert). SMC OOS walk-forward: **PF 1.98, +71.9R, 5/7 windows -> DEPLOYABLE**, stays live. fvg_scalp PF 0.71/-99.7% -> rejected pre-deployment. breakout/MR/LS still negative. Report: `data/backtests/review_fixes_report.md`. Swap on this XM demo is DISABLED (swap_mode=0) so $0/night is correct; re-check on real account. Gotchas: cp1252 crash applies to *redirected* stdout too (Start-Process logs) — suite forces PYTHONIOENCODING=utf-8 for child steps; urllib hits CERTIFICATE_VERIFY_FAILED on the VPS, requests (certifi) works — use requests for Telegram. |
 | 2026-06-04 | H.10 | Added `--force-replace` to train_meta_v2 to promote the honest meta-labeler (val_auc 0.5752) over the overfit 0.749 incumbent (the AUC gate blocked it). Swap runs on the VPS. Default `--target-wr 0.40` -> threshold ~0.05 (near no-op); tune `--target-wr` for selectivity. Stays shadow mode (no live veto) until `ML_SHADOW_MODE=false`. Documented model `.pkl` is gitignored/per-machine. |
 | 2026-06-04 | H.9 | Fixed latent pickle bug: meta-labeler wrapper was a function-local class (`Can't pickle local object`), surfaced the first time a swap actually ran. Moved to module-level `_meta_scorer.MetaModel` so the bot unpickles it without importing the trainer. |

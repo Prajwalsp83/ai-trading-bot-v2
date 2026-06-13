@@ -56,6 +56,7 @@ from _bot_common import (  # noqa: E402
     classify_regime, RegimeParams,
     compute_effective_risk, KellyParams, DEFAULT_DD_TIERS,
     init_mt5_headless, check_mt5_alive_or_reconnect, reset_mt5_failure_counter,
+    control_paused,
 )
 
 # Postgres journal (degrades gracefully if DATABASE_URL not set / DB unreachable)
@@ -593,9 +594,15 @@ def get_equity() -> float:
 def can_open_new_trade(state: dict, side: str, gate_cfg: GateConfig):
     """Composite gate. Returns (allowed, reason, news_summary_or_None).
 
-    Order: max-DD kill-switch → daily loss cap → cooldown → reentry → composite → news.
+    Order: remote pause -> max-DD kill-switch -> daily loss cap -> cooldown
+    -> reentry -> composite -> news.
     """
     now = _now_utc()
+
+    # === Remote pause (Telegram /pause) -- blocks NEW entries only ===
+    paused, pause_why = control_paused()
+    if paused:
+        return False, pause_why, None
 
     # === Max DD kill-switch (HARD halt — needs manual peak_equity reset) ===
     equity = get_equity()

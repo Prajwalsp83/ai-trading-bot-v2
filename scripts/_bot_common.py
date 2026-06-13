@@ -145,6 +145,44 @@ def tg_send(text: str, token: str | None = None, chat: str | None = None) -> Non
         pass
 
 
+# ====================== Remote pause control =========================
+# Flag file written by telegram_control.py (/pause, /resume). Bots check it
+# at the top of can_open_new_trade: paused blocks NEW entries only -- open
+# positions keep their server-side SL/TP and are still managed/reconciled.
+CONTROL_PATH = Path(__file__).resolve().parent.parent / "data" / ".control.json"
+
+
+def control_read(path: Path | None = None) -> dict:
+    p = path or CONTROL_PATH
+    try:
+        with open(p) as f:
+            return json.load(f) or {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def control_paused(path: Path | None = None) -> tuple[bool, str]:
+    """Returns (paused, reason). Fail-open: unreadable flag = not paused."""
+    c = control_read(path)
+    if not c.get("paused"):
+        return False, ""
+    by = c.get("by", "telegram")
+    at = c.get("at_utc", "?")
+    return True, f"remote_pause (by {by} at {at}; send /resume to unpause)"
+
+
+def control_set(paused: bool, by: str = "telegram", path: Path | None = None) -> dict:
+    p = path or CONTROL_PATH
+    c = {"paused": bool(paused), "by": by,
+         "at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(c, f)
+    os.replace(tmp, p)
+    return c
+
+
 # ============================ Session filter =========================
 @dataclass
 class SessionWindow:
